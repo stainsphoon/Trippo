@@ -1,0 +1,6 @@
+{
+  "name": "Trippo",
+  "description": "나의 소중한 여행 기록과 일정을 세련되게 관리하는 Trippo 여행 메이트",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
