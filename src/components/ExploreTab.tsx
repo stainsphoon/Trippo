@@ -49,14 +49,21 @@ interface TravelReport {
   startDate: string;
   endDate: string;
   temp: string;
+  tempEn?: string;
   humidity: string;
   rainySeason: string;
+  rainySeasonEn?: string;
   festivals: string[];
+  festivalsEn?: string[];
   tourists: string;
+  touristsEn?: string;
   level: '추천' | '보통' | '추천 안함';
   description: string;
+  descriptionEn?: string;
   flightPrice?: string;
+  flightPriceEn?: string;
   flightSource?: string;
+  flightSourceEn?: string;
   priceAnalysis?: PriceAnalysis;
   tempLevel: '추천' | '보통' | '나쁨';
   humidityLevel: '추천' | '보통' | '나쁨';
@@ -309,129 +316,201 @@ const getTravelReport = (dep: string, dest: string, start: string, end: string):
   const destClean = dest.trim().toLowerCase();
   
   let temp = '22°C';
+  let tempEn = '22°C';
   let humidity = '60%';
   let rainySeason = '아님 (건기)';
+  let rainySeasonEn = 'No (Dry Season)';
   let festivals: string[] = [];
+  let festivalsEn: string[] = [];
   let tourists = '약 80만 명';
+  let touristsEn = 'Approx. 800k';
   let level: '추천' | '보통' | '추천 안함' = '추천';
   let description = '';
+  let descriptionEn = '';
   let flightPrice = '약 550,000원';
+  let flightPriceEn = 'Approx. 550,000 KRW';
   let flightSource = 'Skyscanner / Google Flights';
+  let flightSourceEn = 'Skyscanner & Google Flights';
 
   const priceAnalysis = analyzeFlightPrices(dep, dest);
   flightPrice = `평균 약 ${priceAnalysis.average.toLocaleString()}원`;
+  flightPriceEn = `Avg. approx. ${priceAnalysis.average.toLocaleString()} KRW`;
 
   if (destClean.includes('파리') || destClean.includes('paris') || destClean.includes('프랑스')) {
     if (month >= 5 && month <= 9) {
       temp = '22°C ~ 26°C';
+      tempEn = '22°C ~ 26°C';
       humidity = '55%';
       rainySeason = '아님 (화창함)';
+      rainySeasonEn = 'No (Sunny & Clear)';
       festivals = ['센 강 음악제 (Fête de la Musique)', '바스티유 데이 군사 퍼레이드', '파리 플라주 해변 축제'];
+      festivalsEn = ['Fête de la Musique (Music Festival)', 'Bastille Day Military Parade', 'Paris Plages (Beach Festival)'];
       tourists = '약 120만 명 (혼잡도: 높음)';
+      touristsEn = 'Approx. 1.2M (Congestion: High)';
       level = '추천';
       description = `${month}월의 파리는 쾌청하고 아름다운 햇살이 가득한 최고의 시즌입니다! 야외 노천카페에서 에스프레소를 즐기기에 더할 나위 없으며, 강변 음악축제와 독립기념일 불꽃놀이가 여행을 영화처럼 만들어 줍니다.`;
+      descriptionEn = `Paris in ${month === 5 ? 'May' : month === 6 ? 'June' : month === 7 ? 'July' : month === 8 ? 'August' : 'September'} is at its peak with pleasant, beautiful sunshine! It is the perfect season to enjoy espresso at open terrace cafes, with river music festivals and Independence Day fireworks making your travel feel like a movie.`;
     } else if (month === 10 || month === 11) {
       temp = '10°C ~ 15°C';
+      tempEn = '10°C ~ 15°C';
       humidity = '72%';
       rainySeason = '간헐적 소나기';
+      rainySeasonEn = 'Occasional Showers';
       festivals = ['파리 가을 예술제 (Festival d\'Automne)', '몽마르뜨 포도 수확 축제'];
+      festivalsEn = ['Festival d\'Automne (Autumn Art Festival)', 'Montmartre Grape Harvest Festival'];
       tourists = '약 75만 명 (혼잡도: 보통)';
+      touristsEn = 'Approx. 750k (Congestion: Moderate)';
       level = '보통';
       description = `${month}월의 파리는 고즈넉한 단풍과 서늘한 공기가 낭만적인 가을 분위기를 선사합니다. 강수량이 살짝 늘어나지만, 줄 서지 않고 박물관과 에펠탑을 여유롭게 관람하기에 적합합니다.`;
+      descriptionEn = `Paris in ${month === 10 ? 'October' : 'November'} presents a romantic autumn vibe with peaceful foliage and cool breeze. Though precipitation increases slightly, it is perfect for visiting museums and the Eiffel Tower leisurely without long queues.`;
     } else {
       temp = '3°C ~ 8°C';
+      tempEn = '3°C ~ 8°C';
       humidity = '80%';
       rainySeason = '잦은 진눈깨비 (겨울 우기)';
+      rainySeasonEn = 'Frequent Sleet (Winter Wet)';
       festivals = ['샹젤리제 크리스마스 마켓 & 빛의 축제', '겨울 살롱 뒤 쇼콜라'];
+      festivalsEn = ['Champs-Élysées Christmas Market & Festival of Lights', 'Winter Salon du Chocolat'];
       tourists = '약 40만 명 (혼잡도: 한산)';
+      touristsEn = 'Approx. 400k (Congestion: Low)';
       level = '보통';
       description = `${month}월의 파리는 날씨가 다소 쌀쌀하고 해가 일찍 지는 편입니다. 그러나 샹젤리제의 은하수 같은 조명과 낭만 가득한 크리스마스 마켓, 한산한 도심 거리를 만끽할 수 있어 겨울만의 특별함이 있습니다.`;
+      descriptionEn = `Paris in ${month === 12 ? 'December' : month === 1 ? 'January' : month === 2 ? 'February' : month === 3 ? 'March' : 'April'} has a rather chilly climate and early sunset. However, it holds a unique winter charm, with Champs-Élysées illuminated by star-like lights, warm Christmas markets, and quiet city streets.`;
     }
     flightSource = '스카이스캐너(Skyscanner) 및 카약(KAYAK) 실시간 평균';
+    flightSourceEn = 'Skyscanner & KAYAK live averages';
   } else if (destClean.includes('도쿄') || destClean.includes('tokyo') || destClean.includes('일본')) {
     if (month >= 3 && month <= 5) {
       temp = '12°C ~ 21°C';
+      tempEn = '12°C ~ 21°C';
       humidity = '60%';
       rainySeason = '아님 (청명하고 맑음)';
+      rainySeasonEn = 'No (Clear & Sunny)';
       festivals = ['도쿄 우에노 벚꽃 마츠리', '아사쿠사 삼자 마츠리 (Sanja Matsuri)'];
+      festivalsEn = ['Ueno Cherry Blossom Festival', 'Asakusa Sanja Matsuri'];
       tourists = '약 140만 명 (혼잡도: 매우 높음)';
+      touristsEn = 'Approx. 1.4M (Congestion: Very High)';
       level = '추천';
       description = `${month}월의 도쿄는 분홍빛 벚꽃과 화사한 봄꽃이 가득한 눈부신 시기입니다. 전 세계 여행객으로 무척 혼잡하지만, 봄기운 가득한 요요기 공원 산책과 전통 축제를 직접 경험하기에는 비교할 수 없이 훌륭합니다.`;
+      descriptionEn = `Tokyo in ${month === 3 ? 'March' : month === 4 ? 'April' : 'May'} is a beautiful, dazzling season filled with pink cherry blossoms and brilliant spring flowers. Although heavily crowded with global tourists, walking around Yoyogi Park and experiencing traditional festivals is incomparable.`;
     } else if (month >= 6 && month <= 8) {
       temp = '26°C ~ 33°C';
+      tempEn = '26°C ~ 33°C';
       humidity = '86%';
       rainySeason = month === 6 || month === 7 ? '여름 장마철 (츠유)' : '국지성 태풍 대비 요망';
+      rainySeasonEn = month === 6 || month === 7 ? 'Tsuyu (Summer Rainy Season)' : 'Be aware of Typhoons';
       festivals = ['스마다강 대규모 불꽃축제 (Hanabi)', '아사쿠사 쌈바 카니발'];
+      festivalsEn = ['Sumida River Fireworks Festival (Hanabi)', 'Asakusa Samba Carnival'];
       tourists = '약 90만 명 (혼잡도: 보통)';
+      touristsEn = 'Approx. 900k (Congestion: Moderate)';
       level = month === 8 ? '보통' : '추천 안함';
       description = `${month}월의 도쿄는 높은 습도와 강한 햇볕으로 무더위가 심합니다. ${month === 8 ? '8월 말에는 태풍이 잦아' : '6~7월은 긴 장마철이라'} 야외 일정 시 날씨 제약이 큽니다. 시원한 오다이바 실내 쇼핑몰과 미식 투어를 위주로 여행을 구성하는 것을 권장합니다.`;
+      descriptionEn = `Tokyo in ${month === 6 ? 'June' : month === 7 ? 'July' : 'August'} is very hot with high humidity and intense sunshine. Weather constraints can be high due to ${month === 8 ? 'frequent typhoons in late August' : 'the long rainy season in June-July'}. We suggest focusing on air-conditioned indoor activities like Odaiba malls and gourmet food tours.`;
     } else if (month >= 9 && month <= 11) {
       temp = '14°C ~ 22°C';
+      tempEn = '14°C ~ 22°C';
       humidity = '64%';
       rainySeason = '아님 (매우 선선)';
+      rainySeasonEn = 'No (Very Cool)';
       festivals = ['메이지 신궁 가을 대축제', '신주쿠 교엔 가을 단풍 라이트업'];
+      festivalsEn = ['Meiji Shrine Autumn Grand Festival', 'Shinjuku Gyoen Autumn Leaves Light-up'];
       tourists = '약 110만 명 (혼잡도: 보통)';
+      touristsEn = 'Approx. 1.1M (Congestion: Moderate)';
       level = '추천';
       description = `${month}월의 도쿄는 맑고 서늘한 바람이 불어 도보 여행에 아주 제격인 황금기입니다! 울긋불긋한 단풍과 야외 야시장이 펼쳐지며 디즈니랜드나 시부야 등을 도보로 쾌적하게 즐길 수 있습니다.`;
+      descriptionEn = `Tokyo in ${month === 9 ? 'September' : month === 10 ? 'October' : 'November'} is a golden period ideal for walking with clear sky and cool breezes! Colorful autumn foliage and night markets open up, making it extremely pleasant to explore Disneyland or Shibuya on foot.`;
     } else {
       temp = '2°C ~ 11°C';
+      tempEn = '2°C ~ 11°C';
       humidity = '48%';
       rainySeason = '아님 (매우 건조)';
+      rainySeasonEn = 'No (Dry & Clear)';
       festivals = ['도쿄 카운트다운 불꽃 페스티벌', '새해 첫 신사 참배 (하츠모데)'];
+      festivalsEn = ['Tokyo Countdown Fireworks Festival', 'New Year Shrine Visit (Hatsumode)'];
       tourists = '약 65만 명 (혼잡도: 여유로움)';
+      touristsEn = 'Approx. 650k (Congestion: Low)';
       level = '보통';
       description = `${month}월의 도쿄는 겨울 바람이 쌀쌀하지만 하늘이 최고로 맑아 웅장한 후지산을 감상하기 좋습니다. 화려한 겨울 일루미네이션을 보며 노천 온천을 아늑하게 즐기기에 완벽합니다.`;
+      descriptionEn = `Tokyo in ${month === 12 ? 'December' : month === 1 ? 'January' : 'February'} has a chilly winter wind but the clearest sky, perfect for seeing Mt. Fuji. It is wonderful for enjoying cozy open-air hot springs under beautiful winter illuminations.`;
     }
     flightSource = '네이버 항공권 및 구글 플라이트(Google Flights) 실시간 평균';
+    flightSourceEn = 'Naver Flights & Google Flights live averages';
   } else if (destClean.includes('보라카이') || destClean.includes('boracay') || destClean.includes('필리핀')) {
     if (month >= 11 || month <= 5) {
       temp = '28°C ~ 32°C';
+      tempEn = '28°C ~ 32°C';
       humidity = '70%';
       rainySeason = '완벽한 건기 (환상적인 에메랄드 해변)';
+      rainySeasonEn = 'Perfect Dry Season (Emerald Beach)';
       festivals = ['보라카이 아티아티한 카니발', '화이트 비치 서머 워터 스포츠 페스타'];
+      festivalsEn = ['Boracay Ati-Atihan Carnival', 'White Beach Summer Water Sports Festa'];
       tourists = '약 65만 명 (혼잡도: 보통)';
+      touristsEn = 'Approx. 650k (Congestion: Moderate)';
       level = '추천';
       description = `${month}월의 보라카이는 투명한 에메랄드빛 화이트비치와 잔잔한 파도가 맞이해주는 일년 중 최고의 건기 시즌입니다! 스쿠버다이빙, 패러세일링 등 해양 스포츠에 천국 같으며 로맨틱한 세일링 보트 선셋 투어가 적극 추천됩니다.`;
+      descriptionEn = `Boracay in month ${month} is in its absolute prime dry season, welcoming you with transparent emerald-colored White Beach and calm waves! It is a paradise for marine sports like scuba diving and parasailing, and a romantic sailing boat sunset tour is highly recommended.`;
     } else {
       temp = '25°C ~ 30°C';
+      tempEn = '25°C ~ 30°C';
       humidity = '92%';
       rainySeason = '우기 돌입 (몬순 기후 및 강력 태풍 주의)';
+      rainySeasonEn = 'Rainy Season (Monsoon & Typhoons)';
       festivals = ['보라카이 드래곤 보트 레가타', '해변 푸드 버켓 축제'];
+      festivalsEn = ['Boracay Dragon Boat Regatta', 'Beach Food Bucket Festival'];
       tourists = '약 20만 명 (혼잡도: 매우 한산)';
+      touristsEn = 'Approx. 200k (Congestion: Low)';
       level = '추천 안함';
       description = `${month}월의 보라카이는 강렬한 서남풍 몬순 바람과 폭우를 동반하는 집중 우기 시즌입니다. 기상 악화 시 액티비티가 취소되거나 해안 통행이 제한될 수 있으므로 화창한 휴양을 원하신다면 이 기간을 피하는 것을 권장합니다.`;
+      descriptionEn = `Boracay in month ${month} is in its heavy rainy season with strong southwest monsoon winds and rainstorms. Outdoor activities might get canceled and beach access restricted during bad weather, so we advise avoiding this period if you want sunny relaxation.`;
     }
     flightSource = '스카이스캐너(Skyscanner) 및 트립닷컴(Trip.com) 실시간 평균';
+    flightSourceEn = 'Skyscanner & Trip.com live averages';
   } else {
     // Custom query fallback dynamic calculations
     const isSummer = month >= 6 && month <= 8;
     const isWinter = month === 12 || month === 1 || month === 2;
     if (isSummer) {
       temp = '24°C ~ 31°C';
+      tempEn = '24°C ~ 31°C';
       humidity = '78%';
       rainySeason = '여름철 국지성 소나기';
+      rainySeasonEn = 'Summer Local Showers';
       festivals = ['로컬 썸머 야외 록 페스티벌', '시원한 강변 야시장 축제'];
+      festivalsEn = ['Local Summer Outdoor Rock Festival', 'Cool Riverside Night Market Festival'];
       tourists = '약 85만 명 (혼잡도: 보통)';
+      touristsEn = 'Approx. 850k (Congestion: Moderate)';
       level = '추천';
       description = `${month}월의 ${dest}은(는) 에너제틱한 여름 정취를 뿜어냅니다! 낮에는 시원한 음료와 함께 도심 예술 거리를 탐방하고, 저녁에는 신나는 물총 축제와 야시장을 즐길 수 있어 다채롭고 활력 넘치는 여행이 가능합니다.`;
+      descriptionEn = `${dest} in ${month === 6 ? 'June' : month === 7 ? 'July' : month === 8 ? 'August' : 'Summer'} radiates an energetic summer atmosphere! Explore urban art streets with cool drinks by day, and enjoy exciting water gun events and night markets by night for a lively, vibrant trip.`;
     } else if (isWinter) {
       temp = '2°C ~ 10°C';
+      tempEn = '2°C ~ 10°C';
       humidity = '62%';
       rainySeason = '겨울철 눈 또는 잦은 소우';
+      rainySeasonEn = 'Winter Snow or Drizzle';
       festivals = ['겨울 눈조각 축제 및 일루미네이션', '해맞이 타운 페스티벌'];
+      festivalsEn = ['Winter Snow Sculptures & Illuminations', 'Sunrise Town Festival'];
       tourists = '약 45만 명 (혼잡도: 여유로움)';
+      touristsEn = 'Approx. 450k (Congestion: Low)';
       level = '보통';
       description = `${month}월의 ${dest}은(는) 포근하고 고요한 겨울빛 낭만이 내려앉은 때입니다. 따뜻한 현지 길거리 음식을 탐미하며 미술관과 극장 등 실내 투어를 조용히 감상하기에 가성비와 매력이 훌륭한 시기입니다.`;
+      descriptionEn = `${dest} in ${month === 12 ? 'December' : month === 1 ? 'January' : month === 2 ? 'February' : 'Winter'} is wrapped in cozy, quiet winter romance. It is an amazing and cost-effective time to leisurely explore indoor tours like museums and theaters while enjoying warm local street food.`;
     } else {
       temp = '13°C ~ 22°C';
+      tempEn = '13°C ~ 22°C';
       humidity = '58%';
       rainySeason = '아님 (가장 쾌적함)';
+      rainySeasonEn = 'No (Most Pleasant)';
       festivals = ['봄/가을 가든 플라워 야외 카니발', '로컬 가을 수확 예술 플리마켓'];
+      festivalsEn = ['Spring/Autumn Garden Flower Outdoor Carnival', 'Local Harvest Arts Flea Market'];
       tourists = '약 75만 명 (혼잡도: 보통)';
+      touristsEn = 'Approx. 750k (Congestion: Moderate)';
       level = '추천';
       description = `${month}월의 ${dest}은(는) 선선하고 상쾌한 바람과 함께 야외 도보 여행을 떠나기 가장 뛰어난 날씨입니다. 하늘이 맑고 온도가 매우 안성맞춤이라 명소 투어, 카페 트레킹, 하이킹에 최상급 조화를 선보입니다.`;
+      descriptionEn = `${dest} in ${month === 3 ? 'March' : month === 4 ? 'April' : month === 5 ? 'May' : month === 9 ? 'September' : month === 10 ? 'October' : 'November'} features cool, refreshing breezes, making it the perfect time to go on an outdoor walking trip. With clear skies and optimal temperatures, it is ideal for sightseeing, cafe trekking, and hiking.`;
     }
     flightSource = '구글 플라이트(Google Flights) 및 주요 글로벌 플랫폼 실시간 평균';
+    flightSourceEn = 'Google Flights & global flight platforms';
   }
 
   // 1. Weather/Temp Rating (날씨)
@@ -567,14 +646,21 @@ const getTravelReport = (dep: string, dest: string, start: string, end: string):
     startDate: start,
     endDate: end,
     temp,
+    tempEn,
     humidity,
     rainySeason,
+    rainySeasonEn,
     festivals,
+    festivalsEn,
     tourists,
+    touristsEn,
     level: computedLevel,
     description,
+    descriptionEn,
     flightPrice,
+    flightPriceEn,
     flightSource,
+    flightSourceEn,
     priceAnalysis,
     tempLevel,
     humidityLevel,
@@ -582,6 +668,19 @@ const getTravelReport = (dep: string, dest: string, start: string, end: string):
     touristLevel,
     priceLevel
   };
+};
+
+const localizeAirportString = (str: string, lang: Language = 'ko') => {
+  if (!str) return str;
+  const match = str.match(/^([A-Z]{3})\b/);
+  if (match) {
+    const code = match[1];
+    const found = AIRPORTS.find(ap => ap.code === code);
+    if (found) {
+      return lang === 'ko' ? `${found.code} (${found.nameKo})` : `${found.code} (${found.nameEn})`;
+    }
+  }
+  return str;
 };
 
 const parseDateString = (dateStr: string) => {
@@ -596,15 +695,16 @@ const formatDateToString = (date: Date) => {
   return `${y}-${m}-${d}`;
 };
 
-const getKoreanDayOfWeek = (date: Date) => {
-  const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
-  return weekdays[date.getDay()];
+const getDayOfWeek = (date: Date, lang: Language = 'ko') => {
+  const weekdaysKo = ['일', '월', '화', '수', '목', '금', '토'];
+  const weekdaysEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  return lang === 'ko' ? weekdaysKo[date.getDay()] : weekdaysEn[date.getDay()];
 };
 
-const formatDisplayShort = (dateStr: string) => {
+const formatDisplayShort = (dateStr: string, lang: Language = 'ko') => {
   const d = parseDateString(dateStr);
   if (isNaN(d.getTime())) return dateStr;
-  return `${d.getFullYear()}. ${String(d.getMonth() + 1).padStart(2, '0')}. ${String(d.getDate()).padStart(2, '0')} (${getKoreanDayOfWeek(d)})`;
+  return `${d.getFullYear()}. ${String(d.getMonth() + 1).padStart(2, '0')}. ${String(d.getDate()).padStart(2, '0')} (${getDayOfWeek(d, lang)})`;
 };
 
 const isSameDay = (d1: Date, d2: Date) => {
@@ -622,10 +722,30 @@ const isDateBetween = (target: Date, start: Date, end: Date) => {
 
 export default function ExploreTab({ onSelectDestination, language = 'ko', isDarkMode = false }: ExploreTabProps) {
   // Input states
-  const [departName, setDepartName] = useState(() => localStorage.getItem('last_departure_airport') || 'ICN (인천국제공항)');
+  const [departName, setDepartName] = useState(() => {
+    const saved = localStorage.getItem('last_departure_airport');
+    if (saved) return localizeAirportString(saved, language);
+    return language === 'ko' ? 'ICN (인천국제공항)' : 'ICN (Incheon International Airport)';
+  });
   const [destName, setDestName] = useState('');
   const [startDate, setStartDate] = useState('2026-07-15');
   const [endDate, setEndDate] = useState('2026-07-19');
+
+  // Update input names automatically when language changes
+  useEffect(() => {
+    if (departName) {
+      const localized = localizeAirportString(departName, language);
+      if (localized !== departName) {
+        setDepartName(localized);
+      }
+    }
+    if (destName) {
+      const localized = localizeAirportString(destName, language);
+      if (localized !== destName) {
+        setDestName(localized);
+      }
+    }
+  }, [language]);
 
   // Validation errors state
   const [validationErrors, setValidationErrors] = useState<{
@@ -656,7 +776,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
 
   const getDepartSuggestions = () => {
     const cleanName = departName.trim();
-    if (!cleanName || cleanName === 'ICN (인천국제공항)') {
+    if (!cleanName || cleanName === 'ICN (인천국제공항)' || cleanName === 'ICN (Incheon International Airport)') {
       return AIRPORTS.filter(ap => ap.countryKo === '한국');
     }
     return filterAirports(cleanName, 8);
@@ -816,7 +936,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
   const getSubMetricBadge = (level: '추천' | '보통' | '나쁨', isPrice = false) => {
     const styles = {
       '추천': 'bg-emerald-50 text-emerald-700 border-emerald-100 dark:bg-emerald-950/20 dark:text-emerald-400 dark:border-emerald-900/30',
-      '보통': 'bg-yellow-50 text-yellow-800 border-yellow-200/50 dark:bg-yellow-950/30 dark:text-yellow-300 dark:border-yellow-900/30',
+      '보통': 'bg-yellow-50 text-yellow-800 border-yellow-200/50 dark:bg-yellow-950/30 dark:text-yellow-300 dark:border-yellow-500/20',
       '나쁨': 'bg-rose-50 text-rose-700 border-rose-100 dark:bg-rose-950/20 dark:text-rose-400 dark:border-rose-900/30'
     };
     
@@ -847,7 +967,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
       case '추천':
         return 'bg-emerald-100 dark:bg-emerald-950/90 border-emerald-300 dark:border-emerald-700 text-emerald-950 dark:text-emerald-50 shadow-sm';
       case '보통':
-        return 'bg-yellow-50/95 dark:bg-yellow-950/15 border-yellow-200 dark:border-yellow-900/30 text-yellow-950 dark:text-yellow-100 shadow-sm';
+        return 'bg-yellow-50/95 dark:bg-yellow-950/30 border-yellow-200 dark:border-yellow-500/25 text-yellow-950 dark:text-yellow-300 shadow-sm';
       case '나쁨':
         return 'bg-rose-100 dark:bg-rose-950/90 border-rose-300 dark:border-rose-700 text-rose-950 dark:text-rose-50 shadow-sm';
     }
@@ -858,7 +978,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
       case '추천':
         return 'bg-emerald-100 dark:bg-emerald-950/90 border-emerald-300 dark:border-emerald-700 shadow-sm';
       case '보통':
-        return 'bg-yellow-50/95 dark:bg-yellow-950/15 border-yellow-200 dark:border-yellow-900/30 shadow-sm';
+        return 'bg-yellow-50/95 dark:bg-yellow-950/35 border-yellow-200 dark:border-yellow-500/20 shadow-sm';
       case '나쁨':
         return 'bg-rose-100 dark:bg-rose-950/90 border-rose-300 dark:border-rose-700 shadow-sm';
     }
@@ -869,7 +989,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
       case '추천':
         return 'bg-emerald-200/50 dark:bg-emerald-900/40 border-emerald-300/60 dark:border-emerald-700/60';
       case '보통':
-        return 'bg-yellow-100/50 dark:bg-yellow-900/10 border-yellow-200/50 dark:border-yellow-800/15';
+        return 'bg-yellow-100/50 dark:bg-yellow-950/40 border-yellow-200/50 dark:border-yellow-500/25';
       case '나쁨':
         return 'bg-rose-200/50 dark:bg-rose-900/40 border-rose-300/60 dark:border-rose-700/60';
     }
@@ -885,9 +1005,9 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
         };
       case '보통':
         return {
-          container: 'bg-yellow-50/95 dark:bg-yellow-950/20 border-yellow-200 dark:border-yellow-900/20 shadow-sm',
-          titleBg: 'bg-yellow-100 dark:bg-yellow-900/40 text-yellow-900 dark:text-yellow-200',
-          text: 'text-yellow-950 dark:text-yellow-100/90'
+          container: 'bg-yellow-50/95 dark:bg-yellow-950/30 border-yellow-200 dark:border-yellow-500/25 shadow-sm',
+          titleBg: 'bg-yellow-100 dark:bg-yellow-500/20 text-yellow-900 dark:text-yellow-300',
+          text: 'text-yellow-950 dark:text-yellow-200'
         };
       case '추천 안함':
         return {
@@ -1250,7 +1370,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
               >
                 <Calendar size={14} className={`${validationErrors.startDate ? 'text-red-500' : 'text-blue-500'} shrink-0`} />
                 <span className="text-[11px] font-sans font-semibold text-gray-800 dark:text-zinc-200 truncate">
-                  {formatDisplayShort(startDate)}
+                  {formatDisplayShort(startDate, language)}
                 </span>
               </button>
 
@@ -1276,7 +1396,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
               >
                 <Calendar size={14} className={`${validationErrors.endDate ? 'text-red-500' : 'text-emerald-500'} shrink-0`} />
                 <span className="text-[11px] font-sans font-semibold text-gray-800 dark:text-zinc-200 truncate">
-                  {formatDisplayShort(endDate)}
+                  {formatDisplayShort(endDate, language)}
                 </span>
               </button>
 
@@ -1293,12 +1413,27 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
             <span className="text-[11px] font-bold text-gray-400 dark:text-stone-500 block mb-1.5">{txt.popular_suggestions}</span>
             <div className="flex gap-1.5 flex-wrap">
               {['파리, 프랑스', '도쿄, 일본', '보라카이, 필리핀'].map((place) => {
-                const isSelected = destName === place;
+                const isSelected = destName === place || 
+                  (destName.includes('CDG') && place.includes('파리')) || 
+                  (destName.includes('NRT') && place.includes('도쿄')) || 
+                  (destName.includes('MPH') && place.includes('보라카이'));
                 return (
                   <button
                     type="button"
                     key={place}
-                    onClick={() => setDestName(place)}
+                    onClick={() => {
+                      let name = place;
+                      if (language === 'en') {
+                        if (place.includes('파리')) name = 'CDG (Charles de Gaulle Airport)';
+                        else if (place.includes('도쿄')) name = 'NRT (Narita International Airport)';
+                        else if (place.includes('보라카이')) name = 'MPH (Godofredo P. Ramos Airport)';
+                      } else {
+                        if (place.includes('파리')) name = 'CDG (샤를드골 국제공항)';
+                        else if (place.includes('도쿄')) name = 'NRT (나리타 국제공항)';
+                        else if (place.includes('보라카이')) name = 'MPH (고도프레도 P. 라모스 공항)';
+                      }
+                      setDestName(name);
+                    }}
                     className={`px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-all cursor-pointer ${
                       isSelected
                         ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/15'
@@ -1409,24 +1544,28 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                 </div>
 
                 {/* Route detail */}
-                <div className="flex items-center justify-between text-xs font-sans">
-                  <div className="flex items-center gap-1.5 text-gray-500 dark:text-zinc-400">
-                    <span className="font-bold text-gray-700 dark:text-zinc-200">{report.departure}</span>
-                    <span className="text-[10px] text-blue-500">🛫</span>
-                    <span className="text-stone-300 dark:text-stone-600">→</span>
-                    <span className="text-[10px] text-emerald-500">🛬</span>
-                    <span className="font-bold text-gray-700 dark:text-zinc-200">{report.destination}</span>
+                <div className="flex items-start justify-between text-xs font-sans">
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-gray-500 dark:text-zinc-400 whitespace-normal break-keep">
+                    <span className="font-bold text-gray-700 dark:text-zinc-200 inline-block min-w-0 max-w-full break-keep whitespace-normal text-left">{report.departure}</span>
+                    <span className="text-[10px] text-blue-500 shrink-0">🛫</span>
+                    <span className="text-stone-300 dark:text-stone-600 shrink-0">→</span>
+                    <span className="text-[10px] text-emerald-500 shrink-0">🛬</span>
+                    <span className="font-bold text-gray-700 dark:text-zinc-200 inline-block min-w-0 max-w-full break-keep whitespace-normal text-left">{report.destination}</span>
                   </div>
                 </div>
 
                 {/* Individual Airline price analysis list */}
                 {report.priceAnalysis && (
                   <div className={`rounded-xl p-2.5 border space-y-1.5 transition-colors duration-300 ${getPriceDetailsStyle(report.priceLevel)}`}>
-                    <span className="text-[9px] font-black text-stone-400 dark:text-zinc-500 uppercase tracking-wider block mb-1">항공사별 상세 분석 가격 목록</span>
+                    <span className="text-[9px] font-black text-stone-400 dark:text-zinc-500 uppercase tracking-wider block mb-1">
+                      {language === 'ko' ? '항공사별 상세 분석 가격 목록' : 'Detailed Price Analysis by Airline'}
+                    </span>
                     {report.priceAnalysis.flights.map((flight, fIdx) => (
                       <div key={fIdx} className="flex justify-between items-center text-[11px] font-sans">
-                        <span className="text-gray-500 dark:text-zinc-400">{flight.airline}</span>
-                        <span className="font-bold text-gray-800 dark:text-zinc-200">{flight.price.toLocaleString()}원</span>
+                        <span className="text-gray-500 dark:text-zinc-400 text-left break-keep whitespace-normal pr-2">{flight.airline}</span>
+                        <span className="font-bold text-gray-800 dark:text-zinc-200 shrink-0">
+                          {language === 'ko' ? `${flight.price.toLocaleString()}원` : `${flight.price.toLocaleString()} KRW`}
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -1473,10 +1612,10 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                 {/* Main mathematical average */}
                 <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-1.5 pt-1.5 border-t border-gray-100/30 dark:border-zinc-800/20">
                   <div className="font-sans font-extrabold text-[15px] text-gray-900 dark:text-zinc-100">
-                    {language === 'ko' ? report.flightPrice : report.flightPrice?.replace('약 ', '~ ').replace('원', ' KRW')}
+                    {language === 'ko' ? report.flightPrice : (report.flightPriceEn || report.flightPrice)}
                   </div>
-                  <div className="text-[9px] text-blue-500 dark:text-blue-400 font-medium bg-white/40 dark:bg-[#15141f]/30 px-2 py-0.5 rounded border border-gray-100 dark:border-zinc-800/40 max-w-[240px] truncate" title={report.flightSource}>
-                    {txt.source}: {report.flightSource}
+                  <div className="text-[9px] text-blue-500 dark:text-blue-400 font-medium bg-white/40 dark:bg-[#15141f]/30 px-2 py-0.5 rounded border border-gray-100 dark:border-zinc-800/40 max-w-[240px] truncate" title={language === 'ko' ? report.flightSource : (report.flightSourceEn || report.flightSource)}>
+                    {txt.source}: {language === 'ko' ? report.flightSource : (report.flightSourceEn || report.flightSource)}
                   </div>
                 </div>
               </div>
@@ -1493,7 +1632,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                   </div>
                 </div>
                 <div className="font-sans font-extrabold text-[15px] text-gray-950 dark:text-white leading-tight">
-                  {report.temp}
+                  {language === 'ko' ? report.temp : (report.tempEn || report.temp)}
                 </div>
                 <div className="text-[11px] text-slate-700/80 dark:text-zinc-300/85 mt-0.5">{txt.temp_desc}</div>
               </div>
@@ -1518,7 +1657,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                       {report.humidity}
                     </div>
                     <div className="text-[11px] text-slate-700/80 dark:text-zinc-300/85 mt-0.5 truncate">
-                      {language === 'ko' ? report.rainySeason : (report.rainySeason?.includes('아님') ? 'Dry Season' : 'Rainy Season')}
+                      {language === 'ko' ? report.rainySeason : (report.rainySeasonEn || report.rainySeason)}
                     </div>
                   </div>
                 );
@@ -1533,12 +1672,12 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                   </div>
                 </div>
                 <div className="font-sans font-extrabold text-[14px] text-gray-950 dark:text-white leading-tight truncate">
-                  {language === 'ko' ? report.tourists.split('(')[0].trim() : '~ 800k / Month'}
+                  {language === 'ko' ? report.tourists.split('(')[0].trim() : (report.touristsEn ? report.touristsEn.split('(')[0].trim() : '~ 800k')}
                 </div>
                 <div className="text-[11px] text-slate-700/80 dark:text-zinc-300/85 mt-0.5">
                   {language === 'ko' 
                     ? (report.tourists.includes('(') ? `혼잡도: ${report.tourists.split('(')[1].replace(')', '').replace('혼잡도:', '').trim()}` : '혼잡도 보통')
-                    : (report.tourists.includes('높음') ? 'Crowded' : 'Moderate')}
+                    : (report.touristsEn && report.touristsEn.includes('(') ? `Congestion: ${report.touristsEn.split('(')[1].replace(')', '').replace('Congestion:', '').trim()}` : 'Moderate Congestion')}
                 </div>
               </div>
 
@@ -1549,11 +1688,13 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                   <span className="text-[10px] font-bold tracking-wide uppercase">{txt.festivals_count}</span>
                 </div>
                 <div className="font-sans font-extrabold text-[14px] text-white leading-tight truncate">
-                  {report.festivals.length > 0 ? (language === 'ko' ? report.festivals[0].split('(')[0] : 'Music Festival') : txt.no_festival}
+                  {report.festivals.length > 0 
+                    ? (language === 'ko' ? report.festivals[0].split('(')[0] : (report.festivalsEn ? report.festivalsEn[0].split('(')[0] : 'Music Festival')) 
+                    : txt.no_festival}
                 </div>
                 <div className="text-[11px] text-slate-300/90 dark:text-slate-400 mt-0.5 truncate">
                   {report.festivals.length > 1 
-                    ? (language === 'ko' ? `외 ${report.festivals.length - 1}개 축제 개최` : `& ${report.festivals.length - 1} more events`) 
+                    ? (language === 'ko' ? `외 ${report.festivals.length - 1}개 축제 개최` : `& ${report.festivals.length - 1} other events`) 
                     : txt.quiet_peaceful}
                 </div>
               </div>
@@ -1567,10 +1708,10 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                     {txt.festivals_list_title}
                   </span>
                   <ul className="space-y-1">
-                    {report.festivals.map((fest, idx) => (
+                    {(language === 'ko' ? report.festivals : (report.festivalsEn || report.festivals)).map((fest, idx) => (
                       <li key={idx} className="text-[11px] font-sans text-slate-100 dark:text-slate-200 flex items-start gap-1">
                         <span className="text-indigo-300 dark:text-indigo-400 mt-0.5">•</span>
-                        <span>{fest}</span>
+                        <span className="whitespace-normal break-keep text-left">{fest}</span>
                       </li>
                     ))}
                   </ul>
@@ -1589,8 +1730,8 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                         {txt.ai_narrative_title}
                       </span>
                     </div>
-                    <p className={`font-sans text-xs leading-relaxed ${styles.text}`}>
-                      {report.description}
+                    <p className={`font-sans text-xs leading-relaxed whitespace-pre-line break-keep text-left ${styles.text}`}>
+                      {language === 'ko' ? report.description : (report.descriptionEn || report.description)}
                     </p>
                   </div>
                 );

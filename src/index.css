@@ -18,6 +18,29 @@
   scrollbar-width: none;
 }
 
+/* Elegant custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.25);
+  border-radius: 9999px;
+  border: 1.5px solid transparent;
+}
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(163, 163, 163, 0.2);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.45);
+}
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(163, 163, 163, 0.4);
+}
+
 @keyframes spin-slow {
   from {
     transform: rotate(0deg);

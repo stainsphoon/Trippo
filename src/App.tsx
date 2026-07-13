@@ -13,6 +13,7 @@ import SettingsTab from './components/SettingsTab';
 import { INITIAL_LOGS, INITIAL_PLAN } from './data/mockData';
 import { TravelLog, TravelPlan, Destination } from './types';
 import { Language } from './utils/translations';
+import { createSharedPlan, updateSharedPlan, subscribeToSharedPlan } from './lib/firebaseService';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('explore'); // Initial active tab is 'explore' (조회)
@@ -42,25 +43,70 @@ export default function App() {
   const [logs, setLogs] = useState<TravelLog[]>([]);
   const [plan, setPlan] = useState<TravelPlan | null>(null);
 
-  // Load Initial Data from LocalStorage
+  // Collaborative Share States
+  const [sharedPlanId, setSharedPlanId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('sharedPlanId');
+  });
+  const [isSharedPlanLoading, setIsSharedPlanLoading] = useState<boolean>(false);
+  const [sharedPlanError, setSharedPlanError] = useState<string | null>(null);
+
+  // Load Initial Logs Data from LocalStorage
   useEffect(() => {
     const savedLogs = localStorage.getItem('trippo_logs');
-    const savedPlan = localStorage.getItem('trippo_plan');
-
     if (savedLogs) {
       setLogs(JSON.parse(savedLogs));
     } else {
       setLogs(INITIAL_LOGS);
       localStorage.setItem('trippo_logs', JSON.stringify(INITIAL_LOGS));
     }
-
-    if (savedPlan) {
-      setPlan(JSON.parse(savedPlan));
-    } else {
-      setPlan(INITIAL_PLAN);
-      localStorage.setItem('trippo_plan', JSON.stringify(INITIAL_PLAN));
-    }
   }, []);
+
+  // Handle Shared Plan loading & subscription or Local fallback
+  useEffect(() => {
+    if (!sharedPlanId) {
+      const savedPlan = localStorage.getItem('trippo_plan');
+      if (savedPlan) {
+        setPlan(JSON.parse(savedPlan));
+      } else {
+        setPlan(INITIAL_PLAN);
+        localStorage.setItem('trippo_plan', JSON.stringify(INITIAL_PLAN));
+      }
+      return;
+    }
+
+    setIsSharedPlanLoading(true);
+    setSharedPlanError(null);
+
+    // Subscribe to shared plan changes in real-time
+    const unsubscribe = subscribeToSharedPlan(
+      sharedPlanId,
+      (fetchedPlan) => {
+        setPlan(fetchedPlan);
+        setIsSharedPlanLoading(false);
+      },
+      (error) => {
+        console.error("Shared plan subscription failed:", error);
+        setSharedPlanError(language === 'ko' ? '일정을 불러오는 데 실패했습니다.' : 'Failed to load schedule.');
+        setIsSharedPlanLoading(false);
+        // Fallback to local plan
+        const savedPlan = localStorage.getItem('trippo_plan');
+        setPlan(savedPlan ? JSON.parse(savedPlan) : INITIAL_PLAN);
+        setSharedPlanId(null);
+        // Remove query param without reload
+        const url = new URL(window.location.href);
+        url.searchParams.delete('sharedPlanId');
+        window.history.pushState({}, '', url.toString());
+      }
+    );
+
+    // Navigate to Plan tab when accessing via share link
+    setActiveTab('plan');
+
+    return () => {
+      unsubscribe();
+    };
+  }, [sharedPlanId, language]);
 
   // Sync to LocalStorage on updates
   const handleAddLog = (newLog: Omit<TravelLog, 'id'>) => {
@@ -87,7 +133,47 @@ export default function App() {
 
   const handleUpdatePlan = (updatedPlan: TravelPlan) => {
     setPlan(updatedPlan);
-    localStorage.setItem('trippo_plan', JSON.stringify(updatedPlan));
+    if (sharedPlanId) {
+      updateSharedPlan(sharedPlanId, updatedPlan).catch((err) => {
+        console.error("Failed to sync shared plan to Firestore:", err);
+      });
+    } else {
+      localStorage.setItem('trippo_plan', JSON.stringify(updatedPlan));
+    }
+  };
+
+  const handleStartSharedMode = async () => {
+    if (!plan) return;
+    try {
+      const docId = await createSharedPlan(plan);
+      setSharedPlanId(docId);
+      
+      const url = new URL(window.location.href);
+      url.searchParams.set('sharedPlanId', docId);
+      window.history.pushState({}, '', url.toString());
+
+      const shareUrl = `${url.origin}${url.pathname}?sharedPlanId=${docId}`;
+      await navigator.clipboard.writeText(shareUrl);
+
+      const alertMsg = language === 'ko'
+        ? '실시간 공동 편집 세션이 시작되었습니다! 초대 링크가 클립보드에 자동 복사되었습니다. 친구에게 보내보세요! 🤝🚀'
+        : 'Real-time collaborative session started! The invite link has been automatically copied to your clipboard. Send it to friends! 🤝🚀';
+      alert(alertMsg);
+    } catch (error) {
+      console.error('Failed to initialize collaborative mode:', error);
+      throw error;
+    }
+  };
+
+  const handleExitSharedMode = () => {
+    setSharedPlanId(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('sharedPlanId');
+    window.history.pushState({}, '', url.toString());
+    const alertMsg = language === 'ko'
+      ? '공유 일정에서 퇴장하여 로컬 일정으로 복귀했습니다.'
+      : 'Exited shared schedule and returned to local schedule.';
+    alert(alertMsg);
   };
 
   const handleResetAllData = () => {
@@ -235,12 +321,40 @@ export default function App() {
           )}
 
           {activeTab === 'plan' && plan && (
-            <PlanTab 
-              plan={plan} 
-              onUpdatePlan={handleUpdatePlan}
-              language={language}
-              isDarkMode={isDarkMode}
-            />
+            isSharedPlanLoading ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <p className="font-sans text-xs text-gray-400">
+                  {language === 'ko' ? '실시간 공유 일정 연결 중...' : 'Connecting to shared schedule...'}
+                </p>
+              </div>
+            ) : sharedPlanError ? (
+              <div className="flex flex-col items-center justify-center py-20 text-center space-y-4 bg-white dark:bg-[#1a1924] rounded-2xl p-6 border border-gray-100 dark:border-white/5 shadow-sm">
+                <span className="text-3xl">⚠️</span>
+                <p className="font-sans text-xs font-bold text-rose-500">
+                  {sharedPlanError}
+                </p>
+                <button
+                  onClick={() => {
+                    setSharedPlanError(null);
+                    setSharedPlanId(null);
+                  }}
+                  className="bg-blue-600 text-white font-sans font-bold text-xs px-4 py-2 rounded-xl"
+                >
+                  {language === 'ko' ? '내 일정으로 돌아가기' : 'Return to My Schedule'}
+                </button>
+              </div>
+            ) : (
+              <PlanTab 
+                plan={plan} 
+                onUpdatePlan={handleUpdatePlan}
+                language={language}
+                isDarkMode={isDarkMode}
+                sharedPlanId={sharedPlanId}
+                onExitSharedMode={handleExitSharedMode}
+                onStartSharedMode={handleStartSharedMode}
+              />
+            )
           )}
 
           {activeTab === 'record' && (

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, ChangeEvent } from 'react';
 import { PenTool, CalendarCheck, MapPin, CalendarDays, Waves, Plus, Trash2, Image as ImageIcon, X, ArrowLeft, ChevronRight, FileText, Check, Clock, ChevronLeft, BookOpen, Globe, User, Upload } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TravelLog, TravelPlan } from '../types';
-import { Language } from '../utils/translations';
+import { Language, translateText } from '../utils/translations';
 
 interface RecordTabProps {
   logs: TravelLog[];
@@ -16,6 +16,7 @@ interface RecordTabProps {
 }
 
 export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, onNavigateToPlan, plan, language = 'ko', isDarkMode = false }: RecordTabProps) {
+  const t = (key: Parameters<typeof translateText>[0], params?: Record<string, string | number>) => translateText(key, language, params);
   // Passport specific states
   const [isPassportOpen, setIsPassportOpen] = useState(false);
   const [activeLogIndex, setActiveLogIndex] = useState(0); // 0 is Info page, 1..N are Logs
@@ -147,7 +148,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
 
   const handleSave = () => {
     if (!draftTitle.trim() || !draftContent.trim()) {
-      alert('제목과 내용을 입력해주세요.');
+      alert(t('alert_input_required'));
       return;
     }
 
@@ -198,12 +199,16 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
     setAvailableSpots([]);
     setDraftStickers([]);
     setIsWriteModalOpen(false);
-    alert(editingLog ? '소중한 여행의 기억이 아름답게 수정되었습니다! 💖' : '추억의 조각들이 따뜻하게 여권에 기록되었습니다! 💖');
+    
+    const successMsg = editingLog
+      ? (language === 'ko' ? '소중한 여행의 기억이 아름답게 수정되었습니다! 💖' : 'Your precious memories have been edited beautifully! 💖')
+      : t('alert_save_success');
+    alert(successMsg);
   };
 
   const handleImportPlan = (p: TravelPlan) => {
     // Populate draft states
-    setDraftTitle(`${p.title} 추억 저장`);
+    setDraftTitle(language === 'ko' ? `${p.title} 추억 저장` : `Memories of ${p.title}`);
     
     // Convert e.g., "2024. 10. 15" -> "2024.10.15" or keep clean
     const cleanDate = p.startDate.replace(/\s+/g, '');
@@ -224,17 +229,19 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
       }
     }
     setDraftImage(firstImage);
-    setDraftTag('계획추억');
+    setDraftTag(language === 'ko' ? '계획추억' : 'PlannedMemory');
     
     const uniqueSpots = Array.from(new Set(spots));
     setAvailableSpots(uniqueSpots);
     setDraftVisitedSpots(uniqueSpots); // Precheck all spots by default so users can select/customize!
 
-    setDraftMood('🤩 신남');
-    setDraftWeather('☀️ 맑음');
+    setDraftMood(language === 'ko' ? '🤩 신남' : '🤩 Thrilled');
+    setDraftWeather(language === 'ko' ? '☀️ 맑음' : '☀️ Sunny');
     setDraftAnecdote('');
     setDraftBestBite('');
-    setDraftContent(`계획했던 ${p.title} 여행을 마친 후 느낀 사소한 기쁨이나 잊지 못할 추억을 가득 적어보세요.`);
+    setDraftContent(language === 'ko' 
+      ? `계획했던 ${p.title} 여행을 마친 후 느낀 사소한 기쁨이나 잊지 못할 추억을 가득 적어보세요.`
+      : `Write down small pleasures or unforgettable memories from your trip to ${p.title}.`);
 
     setIsImportModalOpen(false);
     setSelectedImportPlan(null);
@@ -248,7 +255,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
         <div className="flex items-center justify-between relative pb-1">
           <h3 className="font-sans font-black text-xl text-stone-800 flex items-center gap-2">
             <BookOpen className="text-[#3b82f6]" size={24} />
-            <span>나의 여행 여권</span>
+            <span>{language === 'ko' ? '나의 여행 여권' : 'My Travel Passport'}</span>
           </h3>
           <div className="flex items-center gap-2">
             {/* The + Button for adding logs */}
@@ -256,7 +263,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
               <button
                 onClick={() => setIsAddDropdownOpen(!isAddDropdownOpen)}
                 className="w-10 h-10 bg-[#3b82f6] hover:bg-blue-600 text-white rounded-full flex items-center justify-center shadow-md active:scale-95 transition-all z-40 relative"
-                title="기록 추가하기"
+                title={language === 'ko' ? '기록 추가하기' : 'Add Record'}
               >
                 <Plus size={22} className={`transition-transform duration-200 ${isAddDropdownOpen ? 'rotate-45' : ''}`} />
               </button>
@@ -281,7 +288,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                         className="w-full px-4 py-3 text-left hover:bg-stone-50 flex items-center gap-2.5 font-sans text-xs font-bold text-stone-700 transition-colors"
                       >
                         <PenTool size={15} className="text-blue-500" />
-                        <span>✍️ 새로 기록하기</span>
+                        <span>{language === 'ko' ? '✍️ 새로 기록하기' : '✍️ Write New Memory'}</span>
                       </button>
                       <button
                         onClick={() => {
@@ -291,7 +298,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                         className="w-full px-4 py-3 text-left hover:bg-stone-50 flex items-center gap-2.5 font-sans text-xs font-bold text-stone-700 transition-colors"
                       >
                         <CalendarCheck size={15} className="text-emerald-500" />
-                        <span>📂 계획에서 불러오기</span>
+                        <span>{language === 'ko' ? '📂 계획에서 불러오기' : '📂 Import from Plan'}</span>
                       </button>
                     </motion.div>
                   </>
@@ -304,7 +311,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                 onClick={() => setIsPassportOpen(false)}
                 className="text-xs font-bold text-stone-600 bg-stone-100 hover:bg-stone-200 px-3 py-2 rounded-xl transition-all active:scale-95 flex items-center gap-1 h-10"
               >
-                여권 닫기
+                {language === 'ko' ? '여권 닫기' : 'Close Passport'}
               </button>
             )}
           </div>
@@ -369,7 +376,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
               {/* Bottom Text / Touch cue - Simple and static */}
               <div className="text-center mb-1 space-y-1.5 z-10 pl-4">
                 <div className="inline-flex items-center gap-1.5 bg-[#4a7865]/10 text-[#4a7865] px-4 py-2 rounded-2xl border border-[#4a7865]/20 text-xs font-black shadow-sm bg-white">
-                  <span>여권 열어보기</span>
+                  <span>{language === 'ko' ? '여권 열어보기' : 'Open Passport'}</span>
                   <span>📖</span>
                 </div>
               </div>
@@ -659,12 +666,14 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                                 {isScrapbook && scrapbookData.visitedSpots && scrapbookData.visitedSpots.length > 0 && (
                                   <div className="mt-1 flex flex-wrap gap-1 justify-center max-w-[210px] mx-auto opacity-90 scale-90">
                                     <span className="bg-[#4a7865]/10 text-[#4a7865] border border-[#4a7865]/20 font-sans font-black text-[8px] px-2 py-0.5 rounded-full">
-                                      📍 {scrapbookData.visitedSpots.length}곳의 소중한 기록
+                                      📍 {language === 'ko' 
+                                        ? `${scrapbookData.visitedSpots.length}곳의 소중한 기록` 
+                                        : `${scrapbookData.visitedSpots.length} recorded place(s)`}
                                     </span>
                                   </div>
                                 )}
                                 <span className="inline-flex items-center gap-1 font-sans text-[9px] font-black text-[#4a7865] bg-[#4a7865]/10 px-2 py-0.5 rounded-md mt-2 select-none">
-                                  🔍 터치하여 추억 펼치기
+                                  {language === 'ko' ? '🔍 터치하여 추억 펼치기' : '🔍 Tap to open memory'}
                                 </span>
                               </div>
                             </motion.div>
@@ -755,7 +764,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
               <div className="p-6 overflow-y-auto flex-1 space-y-5 bg-stone-50/30 dark:bg-[#13121a]/30">
                 {/* 1. Memory Photo Section */}
                 <div className="space-y-2.5 text-left">
-                  <label className="text-[10px] font-black text-stone-400 uppercase tracking-widest ml-1">📸 추억의 한 장면 (사진 업로드 / 선택)</label>
+                  <label className="text-[10px] font-black text-stone-400 uppercase tracking-widest ml-1">{t('photo_title')}</label>
                   {draftImage ? (
                     <div className="relative w-full h-44 rounded-2xl overflow-hidden bg-stone-100 border border-stone-200 shadow-sm group">
                       <img src={draftImage} alt="Draft" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
@@ -771,14 +780,18 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                       <div className="w-full h-32 border-2 border-dashed border-stone-300 rounded-2xl bg-white flex flex-col items-center justify-center text-stone-400 p-4 gap-2.5 shadow-inner">
                         <div className="flex flex-col items-center">
                           <ImageIcon size={24} className="mb-1 text-[#4a7865]" />
-                          <span className="font-sans text-[11px] font-extrabold text-stone-700">추억하고 싶은 순간의 사진</span>
-                          <span className="font-sans text-[9px] text-stone-400">사진첩에서 올리거나 샘플 사진을 선택해보세요</span>
+                          <span className="font-sans text-[11px] font-extrabold text-stone-700">
+                            {language === 'ko' ? '추억하고 싶은 순간의 사진' : 'A photo of the moment you want to remember'}
+                          </span>
+                          <span className="font-sans text-[9px] text-stone-400">
+                            {language === 'ko' ? '사진첩에서 올리거나 샘플 사진을 선택해보세요' : 'Upload from your album or choose a sample photo'}
+                          </span>
                         </div>
                         
                         {/* Native Album Photo Upload */}
                         <label className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-[#4a7865] rounded-xl border border-emerald-200 text-[10px] font-black cursor-pointer transition-all shadow-xs active:scale-95">
                           <Upload size={12} />
-                          내 사진첩에서 가져오기
+                          {t('photo_upload_btn')}
                           <input
                             type="file"
                             accept="image/*"
@@ -791,7 +804,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                       {/* Image URL Input */}
                       <input
                         type="text"
-                        placeholder="또는 http://... 이미지 주소 직접 입력"
+                        placeholder={t('photo_placeholder')}
                         value={draftImage}
                         onChange={(e) => setDraftImage(e.target.value)}
                         className="w-full bg-white rounded-xl border border-stone-200 px-3 py-2 text-[11px] font-sans text-stone-700 outline-none focus:ring-1 focus:ring-stone-400"
@@ -804,14 +817,14 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                             key={img.url}
                             onClick={() => {
                               setDraftImage(img.url);
-                              if (img.name === '보라카이 바다') {
-                                setDraftTag('자연휴양');
-                              } else if (img.name === '파리 에펠탑') {
+                              if (img.name === '보라카이 바다' || img.name === 'Boracay Ocean') {
+                                setDraftTag(language === 'ko' ? '자연휴양' : 'Nature');
+                              } else if (img.name === '파리 에펠탑' || img.name === 'Eiffel Tower, Paris') {
                                 setDraftLocation('Paris');
-                                setDraftTag('로맨틱');
+                                setDraftTag(language === 'ko' ? '로맨틱' : 'Romantic');
                               } else {
                                 setDraftLocation('Tokyo');
-                                setDraftTag('도심탐방');
+                                setDraftTag(language === 'ko' ? '도심탐방' : 'City');
                               }
                             }}
                             className="rounded-xl overflow-hidden h-10 relative border border-stone-200/60 hover:opacity-90 active:scale-95 transition-all shadow-xs"
@@ -831,9 +844,12 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                 <div className="grid grid-cols-1 gap-4.5 text-left">
                   {/* Mood Selector */}
                   <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">🎭 그날의 기분 스티커</label>
+                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('mood_label')}</label>
                     <div className="flex flex-wrap gap-1.5">
-                      {['🥰 설렘', '🤩 신남', '😴 피곤', '😋 먹부림', '☕ 여유', '🌧️ 운치', '💖 완벽'].map((mood) => (
+                      {(language === 'ko'
+                        ? ['🥰 설렘', '🤩 신남', '😴 피곤', '😋 먹부림', '☕ 여유', '🌧️ 운치', '💖 완벽']
+                        : ['🥰 Excited', '🤩 Thrilled', '😴 Tired', '😋 Foodie', '☕ Relaxed', '🌧️ Moody', '💖 Perfect']
+                      ).map((mood) => (
                         <button
                           key={mood}
                           type="button"
@@ -852,9 +868,12 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
 
                   {/* Weather Selector */}
                   <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">🌤️ 그날의 날씨 스탬프</label>
+                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('weather_label')}</label>
                     <div className="flex flex-wrap gap-1.5">
-                      {['☀️ 맑음', '☁️ 흐림', '🌧️ 비', '❄️ 눈', '💨 바람'].map((weather) => (
+                      {(language === 'ko'
+                        ? ['☀️ 맑음', '☁️ 흐림', '🌧️ 비', '❄️ 눈', '💨 바람']
+                        : ['☀️ Sunny', '☁️ Cloudy', '🌧️ Rainy', '❄️ Snowy', '💨 Windy']
+                      ).map((weather) => (
                         <button
                           key={weather}
                           type="button"
@@ -874,10 +893,10 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                   {/* Pre-saved Stamp Stickers */}
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-[#4a7865] uppercase tracking-widest ml-1 flex items-center gap-1">
-                      <span>🎟️ 추억 스탬프 스티커 붙이기</span>
+                      <span>{t('stamp_stickers_label')}</span>
                       <span className="bg-[#4a7865]/10 text-[#4a7865] text-[8px] px-1 rounded-sm">Hot!</span>
                     </label>
-                    <p className="text-[9px] text-stone-400 leading-none mb-1.5">원하는 스탬프들을 클릭하여 폴라로이드 사진에 이쁘게 소장해보세요!</p>
+                    <p className="text-[9px] text-stone-400 leading-none mb-1.5">{t('stamp_stickers_desc')}</p>
                     <div className="flex flex-wrap gap-1.5">
                       {PRESET_STICKERS.map((sticker) => {
                         const isSelected = draftStickers.includes(sticker.emoji);
@@ -910,8 +929,8 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                 {/* 3. Visited Places checklist from Plan */}
                 {availableSpots.length > 0 && (
                   <div className="bg-[#fcfbf7] border border-stone-200/70 rounded-2xl p-4 text-left space-y-2 shadow-xs">
-                    <span className="text-[10px] font-black text-stone-500 uppercase tracking-widest block">🗺️ 계획된 장소 중 다녀온 곳 발도장 찍기 (추가 기록)</span>
-                    <p className="text-[9px] text-stone-400 leading-none">방문한 곳을 터치하여 이번 기록과 연동해보세요!</p>
+                    <span className="text-[10px] font-black text-stone-500 uppercase tracking-widest block">{t('visited_spots_label')}</span>
+                    <p className="text-[9px] text-stone-400 leading-none">{t('visited_spots_desc')}</p>
                     <div className="flex flex-wrap gap-1.5 pt-1">
                       {availableSpots.map((spot, i) => {
                         const isChecked = draftVisitedSpots.includes(spot);
@@ -945,78 +964,78 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3 text-left">
                     <div className="space-y-1">
-                      <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">📍 방문 도시</label>
+                      <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('visit_city')}</label>
                       <input
                         type="text"
                         value={draftLocation}
                         onChange={(e) => setDraftLocation(e.target.value)}
                         className="w-full bg-white dark:bg-[#15141f] rounded-xl border border-stone-200 dark:border-[#2b2a3c] px-3.5 py-2.5 text-xs font-sans text-gray-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-stone-400 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-600"
-                        placeholder="예: 파리, Paris"
+                        placeholder={t('visit_city_placeholder')}
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">📅 기억할 날짜</label>
+                      <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('visit_date')}</label>
                       <input
                         type="text"
                         value={draftDate}
                         onChange={(e) => setDraftDate(e.target.value)}
                         className="w-full bg-white dark:bg-[#15141f] rounded-xl border border-stone-200 dark:border-[#2b2a3c] px-3.5 py-2.5 text-xs font-sans text-gray-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-stone-400 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-600"
-                        placeholder="예: 2026.07.11"
+                        placeholder={t('visit_date_placeholder')}
                       />
                     </div>
                   </div>
 
                   <div className="space-y-1 text-left">
-                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">🏷️ 추억 태그</label>
+                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('log_tag')}</label>
                     <input
                       type="text"
                       value={draftTag}
                       onChange={(e) => setDraftTag(e.target.value)}
                       className="w-full bg-white dark:bg-[#15141f] rounded-xl border border-stone-200 dark:border-[#2b2a3c] px-3.5 py-2.5 text-xs font-sans text-gray-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-stone-400 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-600"
-                      placeholder="예: 힐링, 커플여행, 빵지순례"
+                      placeholder={t('log_tag_placeholder')}
                     />
                   </div>
 
                   {/* 5. Scrapbook Cute mini prompts */}
                   <div className="grid grid-cols-1 gap-3 text-left pt-1">
                     <div className="space-y-1">
-                      <label className="text-[10px] font-black text-orange-500 dark:text-orange-400 uppercase tracking-widest ml-1">🍕 오늘 최고의 한 입 (Tasty Bite)</label>
+                      <label className="text-[10px] font-black text-orange-500 dark:text-orange-400 uppercase tracking-widest ml-1">{t('best_bite')}</label>
                       <input
                         type="text"
                         value={draftBestBite}
                         onChange={(e) => setDraftBestBite(e.target.value)}
                         className="w-full bg-orange-50/20 dark:bg-orange-950/20 rounded-xl border border-orange-200/40 dark:border-orange-900/30 px-3.5 py-2.5 text-xs font-sans text-stone-800 dark:text-stone-200 outline-none focus:ring-1 focus:ring-orange-300 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-650"
-                        placeholder="예: 에펠탑 앞 잔디밭에서 한 입 베어문 누텔라 크레페!"
+                        placeholder={t('best_bite_placeholder')}
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-[10px] font-black text-purple-500 dark:text-purple-400 uppercase tracking-widest ml-1">💡 사소한 해프닝 / 웃겼던 이야기</label>
+                      <label className="text-[10px] font-black text-purple-500 dark:text-purple-400 uppercase tracking-widest ml-1">{t('anecdote')}</label>
                       <textarea
                         value={draftAnecdote}
                         onChange={(e) => setDraftAnecdote(e.target.value)}
                         className="w-full bg-purple-50/20 dark:bg-purple-950/20 rounded-xl border border-purple-200/40 dark:border-purple-900/30 px-3.5 py-2.5 text-xs font-sans text-stone-850 dark:text-stone-200 outline-none focus:ring-1 focus:ring-purple-300 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-650 h-16 resize-none"
-                        placeholder="예: 우산이 없어서 역 앞 처마 밑에 30분 서있었는데, 그곳 뷰가 너무 평화롭고 음악 같았다."
+                        placeholder={t('anecdote_placeholder')}
                       />
                     </div>
                   </div>
 
                   {/* 6. Title and Story Content */}
                   <div className="bg-[#4a7865]/5 dark:bg-[#4a7865]/10 rounded-2xl p-4 border border-[#4a7865]/20 space-y-2 text-left">
-                    <label className="text-[10px] font-black text-[#4a7865] dark:text-[#5fa286] uppercase tracking-widest">📖 이 추억의 한줄 제목</label>
+                    <label className="text-[10px] font-black text-[#4a7865] dark:text-[#5fa286] uppercase tracking-widest">{t('log_title_label')}</label>
                     <input
                       type="text"
                       value={draftTitle}
                       onChange={(e) => setDraftTitle(e.target.value)}
                       className="w-full bg-transparent border-none p-0 text-stone-800 dark:text-stone-100 font-sans font-black text-base focus:ring-0 placeholder:text-stone-400 dark:placeholder:text-stone-600 outline-none"
-                      placeholder="여운을 담은 제목을 작성해주세요"
+                      placeholder={t('log_title_placeholder')}
                     />
                     <div className="border-t border-[#4a7865]/10 my-2" />
-                    <label className="text-[10px] font-black text-[#4a7865] dark:text-[#5fa286] uppercase tracking-widest">✍️ 자유로운 여행의 여운 (추억 에세이)</label>
+                    <label className="text-[10px] font-black text-[#4a7865] dark:text-[#5fa286] uppercase tracking-widest">{t('log_content_label')}</label>
                     <textarea
                       value={draftContent}
                       onChange={(e) => setDraftContent(e.target.value)}
                       className="w-full bg-transparent border-none p-0 text-stone-600 dark:text-stone-300 font-sans text-xs sm:text-sm focus:ring-0 placeholder:text-stone-400 dark:placeholder:text-stone-600 resize-none h-28 outline-none leading-relaxed"
-                      placeholder="계획에는 없던, 길을 가다 멈춰 선 골목길 풍경, 따뜻했던 바람 등 소중한 오감의 기억들을 소박하게 적어주세요..."
+                      placeholder={t('log_content_placeholder')}
                     ></textarea>
                   </div>
                 </div>
@@ -1028,13 +1047,13 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                   onClick={() => { setIsWriteModalOpen(false); setEditingLog(null); }}
                   className="bg-white dark:bg-[#1a1924] hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-500 dark:text-stone-400 border border-stone-200 dark:border-[#2b2a3c] px-5 py-2.5 rounded-xl font-sans text-xs font-black transition-all active:scale-95"
                 >
-                  취소
+                  {t('cancel')}
                 </button>
                 <button
                   onClick={handleSave}
                   className="bg-[#4a7865] hover:bg-[#3d6353] text-white px-6 py-2.5 rounded-xl font-sans text-xs font-black transition-all active:scale-95 shadow-md flex items-center gap-1"
                 >
-                  저장하고 간직하기 💖
+                  {t('save_log_btn')}
                 </button>
               </div>
             </motion.div>
@@ -1069,7 +1088,9 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                     </button>
                   )}
                   <h3 className="font-sans font-bold text-base text-gray-800">
-                    {selectedImportPlan ? '일정 세부 정보 확인' : '내 계획에서 불러오기'}
+                    {selectedImportPlan 
+                      ? (language === 'ko' ? '일정 세부 정보 확인' : 'Confirm Plan Details') 
+                      : (language === 'ko' ? '내 계획에서 불러오기' : 'Import from My Plan')}
                   </h3>
                 </div>
                 <button
@@ -1085,14 +1106,20 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                 {!selectedImportPlan ? (
                   // Plan List view (ONLY displays main title and dates!)
                   <div className="space-y-4">
-                    <p className="font-sans text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">계획 목록</p>
+                    <p className="font-sans text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">
+                      {language === 'ko' ? '계획 목록' : 'Plan List'}
+                    </p>
                     {!plan ? (
                       <div className="flex flex-col items-center justify-center py-12 text-center text-gray-400 space-y-2">
                         <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center border border-dashed border-gray-200">
                           <FileText size={24} className="text-gray-300" />
                         </div>
-                        <p className="font-sans text-xs font-semibold text-gray-600">작성된 계획이 없습니다.</p>
-                        <p className="font-sans text-[11px] text-gray-400">새로운 여행 계획을 계획 탭에서 먼저 세워보세요!</p>
+                        <p className="font-sans text-xs font-semibold text-gray-600">
+                          {language === 'ko' ? '작성된 계획이 없습니다.' : 'No plan available.'}
+                        </p>
+                        <p className="font-sans text-[11px] text-gray-400">
+                          {language === 'ko' ? '새로운 여행 계획을 계획 탭에서 먼저 세워보세요!' : 'Please create a travel plan in the Plan tab first!'}
+                        </p>
                       </div>
                     ) : (
                       <div className="space-y-3">
@@ -1135,12 +1162,14 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                         <div key={day.dayNumber} className="border border-gray-100/80 rounded-2xl bg-white p-4 space-y-3 shadow-sm">
                           <div className="flex justify-between items-center border-b border-gray-100 pb-2">
                             <span className="font-sans font-black text-xs text-gray-800 flex items-center gap-1.5">
-                              <span className="text-xs">📅</span> {day.dayNumber}일차 ({day.dayOfWeek})
+                              <span className="text-xs">📅</span> {language === 'ko' ? `${day.dayNumber}일차` : `Day ${day.dayNumber}`} ({day.dayOfWeek})
                             </span>
                             <span className="font-mono text-[10px] text-gray-400 font-medium">{day.date}</span>
                           </div>
                           {day.items.length === 0 ? (
-                            <p className="text-xs text-gray-400 italic">등록된 세부 일정이 없습니다.</p>
+                            <p className="text-xs text-gray-400 italic">
+                              {language === 'ko' ? '등록된 세부 일정이 없습니다.' : 'No schedules registered.'}
+                            </p>
                           ) : (
                             <div className="space-y-4 pl-3.5 relative before:content-[''] before:absolute before:left-[4px] before:top-2 before:bottom-2 before:w-[1.5px] before:bg-blue-100/50">
                               {day.items.map((item, idx) => (
@@ -1186,7 +1215,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                     className="w-full bg-blue-600 hover:bg-blue-700 text-white font-sans font-bold text-xs px-6 py-3.5 rounded-2xl shadow-md active:scale-95 transition-all flex items-center justify-center gap-2"
                   >
                     <Check size={14} />
-                    이 계획 기록으로 불러오기
+                    {language === 'ko' ? '이 계획 기록으로 불러오기' : 'Import This Plan to Memory'}
                   </button>
                 </div>
               )}
@@ -1215,7 +1244,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                 <div className="flex items-center gap-2">
                   <span className="text-sm">🛂</span>
                   <h3 className="font-sans font-black text-xs text-stone-600 dark:text-stone-400 uppercase tracking-widest font-mono">
-                    출입국 기록 증명 / Certificate
+                    {language === 'ko' ? '출입국 기록 증명 / Certificate' : 'Certificate of Entry/Exit'}
                   </h3>
                 </div>
                 <button
@@ -1250,7 +1279,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                         />
                       ) : (
                         <div className="w-full h-full bg-stone-100 dark:bg-[#1a1924] flex items-center justify-center text-stone-400 dark:text-stone-500 text-xs font-semibold">
-                          사진 없음
+                          {t('photo_none')}
                         </div>
                       )}
 
@@ -1325,14 +1354,14 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                             <div className="bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200/50 dark:border-amber-900/30 p-2.5 rounded-2xl flex items-center gap-2">
                               <span className="text-xl">🎭</span>
                               <div className="text-left">
-                                <span className="block text-[8px] text-amber-500 dark:text-amber-400 font-bold leading-none">그날의 기분</span>
+                                <span className="block text-[8px] text-amber-500 dark:text-amber-400 font-bold leading-none">{t('mood_label_short')}</span>
                                 <span className="text-xs font-sans font-extrabold text-stone-700 dark:text-stone-200">{scrapbookData.mood}</span>
                               </div>
                             </div>
                             <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/40 dark:border-blue-900/30 p-2.5 rounded-2xl flex items-center gap-2">
                               <span className="text-xl">🌤️</span>
                               <div className="text-left">
-                                <span className="block text-[8px] text-blue-500 dark:text-blue-400 font-bold leading-none">그날의 날씨</span>
+                                <span className="block text-[8px] text-blue-500 dark:text-blue-400 font-bold leading-none">{t('weather_label_short')}</span>
                                 <span className="text-xs font-sans font-extrabold text-stone-700 dark:text-stone-200">{scrapbookData.weather}</span>
                               </div>
                             </div>
@@ -1354,7 +1383,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                               {scrapbookData.bestBite && (
                                 <div className="bg-orange-50/50 dark:bg-orange-950/20 border border-orange-200/30 dark:border-orange-900/30 p-3 rounded-2xl space-y-1 text-left">
                                   <span className="inline-flex items-center gap-1 text-[9px] font-black text-orange-600 dark:text-orange-400 uppercase bg-orange-100/50 dark:bg-orange-950/40 px-2 py-0.5 rounded-md">
-                                    🍕 최고의 한 입 (Yum!)
+                                    {language === 'ko' ? '🍕 최고의 한 입 (Yum!)' : '🍕 Best Bite (Yum!)'}
                                   </span>
                                   <p className="font-sans text-xs text-stone-700 dark:text-stone-200 font-bold">{scrapbookData.bestBite}</p>
                                 </div>
@@ -1362,7 +1391,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                               {scrapbookData.anecdote && (
                                 <div className="bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200/30 dark:border-purple-900/30 p-3 rounded-2xl space-y-1 text-left">
                                   <span className="inline-flex items-center gap-1 text-[9px] font-black text-purple-600 dark:text-purple-400 uppercase bg-purple-100/50 dark:bg-purple-950/40 px-2 py-0.5 rounded-md">
-                                    💡 소소한 해프닝 / 기억에 남는 일
+                                    {language === 'ko' ? '💡 소소한 해프닝 / 기억에 남는 일' : '💡 Cozy Anecdote / Memoir'}
                                   </span>
                                   <p className="font-sans text-xs text-stone-600 dark:text-stone-300 leading-relaxed whitespace-pre-wrap">{scrapbookData.anecdote}</p>
                                 </div>
@@ -1373,7 +1402,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                           {/* Selected Stamp Stickers */}
                           {scrapbookData.stickers && scrapbookData.stickers.length > 0 && (
                             <div className="bg-stone-50 dark:bg-[#1a1924] border border-stone-200/60 dark:border-[#262435] p-3.5 rounded-2xl text-left space-y-2">
-                              <span className="text-[9px] font-black text-stone-500 dark:text-stone-400 uppercase tracking-widest block">기록에 찍힌 추억 스탬프 🎟️</span>
+                              <span className="text-[9px] font-black text-stone-500 dark:text-stone-400 uppercase tracking-widest block">{t('stamps_record_header')}</span>
                               <div className="flex flex-wrap gap-1.5">
                                 {scrapbookData.stickers.map((emoji: string, i: number) => {
                                   const preset = PRESET_STICKERS.find(p => p.emoji === emoji);
@@ -1391,7 +1420,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                           {/* Checked spots / locations visited */}
                           {scrapbookData.visitedSpots && scrapbookData.visitedSpots.length > 0 && (
                             <div className="bg-stone-50 dark:bg-[#1a1924] border border-stone-200/60 dark:border-[#262435] p-3.5 rounded-2xl text-left space-y-2">
-                              <span className="text-[9px] font-black text-stone-500 dark:text-stone-400 uppercase tracking-widest block">발도장 찍은 장소들 👣</span>
+                              <span className="text-[9px] font-black text-stone-500 dark:text-stone-400 uppercase tracking-widest block">{t('visited_spots_header')}</span>
                               <div className="flex flex-wrap gap-1.5">
                                 {scrapbookData.visitedSpots.map((spot: string, i: number) => (
                                   <span key={i} className="bg-white dark:bg-[#13121a] border border-stone-200 dark:border-[#2b2a3c] text-[10px] text-stone-700 dark:text-stone-200 px-2 py-1 rounded-xl font-medium flex items-center gap-1 shadow-xs">
@@ -1421,7 +1450,7 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
               <div className="p-4 border-t border-stone-200/60 dark:border-[#262435] bg-stone-100/50 dark:bg-[#13121a] flex items-center justify-between sticky bottom-0 z-15 gap-2">
                 <button
                   onClick={() => {
-                    if (confirm('이 여행 기록을 지우시겠습니까?')) {
+                    if (confirm(language === 'ko' ? '이 여행 기록을 지우시겠습니까?' : 'Are you sure you want to delete this memory?')) {
                       onDeleteLog(selectedLog.id);
                       setSelectedLog(null);
                       // Adjust active index
@@ -1433,21 +1462,21 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
                   className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-400 px-3 py-2.5 rounded-xl font-sans text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 shrink-0"
                 >
                   <Trash2 size={14} />
-                  삭제
+                  {t('delete')}
                 </button>
                 <button
                   onClick={() => handleStartEdit(selectedLog)}
                   className="bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-400 px-3.5 py-2.5 rounded-xl font-sans text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 flex-1 justify-center"
                 >
                   <PenTool size={14} />
-                  수정하기
+                  {t('edit')}
                 </button>
                 <button
                   onClick={() => setSelectedLog(null)}
                   className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl font-sans text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 shrink-0"
                 >
                   <Check size={14} />
-                  확인
+                  {language === 'ko' ? '확인' : 'OK'}
                 </button>
               </div>
             </motion.div>

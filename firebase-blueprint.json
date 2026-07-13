@@ -1,0 +1,18 @@
+{
+  "firestore": {
+    "collections": {
+      "shared_plans": {
+        "description": "Shared travel plans for collaborative editing",
+        "fields": {
+          "id": { "type": "string", "required": true },
+          "title": { "type": "string", "required": true },
+          "startDate": { "type": "string", "required": true },
+          "endDate": { "type": "string", "required": true },
+          "durationText": { "type": "string", "required": true },
+          "days": { "type": "array", "required": true },
+          "updatedAt": { "type": "timestamp", "required": true }
+        }
+      }
+    }
+  }
+}
