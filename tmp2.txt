@@ -1,0 +1,11 @@
+                    {/* Collapsed Header */}
+                    <div
+                      onClick={() => !isEditMode && handleToggleAccordion(item.id)}
+                      className="pr-8 flex justify-between items-start cursor-pointer select-none"
+                    >
+                      <div>
+                        <h4
+                          className={`font-sans font-bold text-sm leading-tight ${
+                            isExpanded ? 'text-blue-600 dark:text-blue-400' : 'text-gray-800 dark:text-text-primary'
+                          }`}
+                        >

@@ -1,5 +1,6 @@
 import { Compass, Calendar, NotebookPen, Settings } from 'lucide-react';
 import { translateText, Language } from '../utils/translations';
+import { motion } from 'motion/react';
 
 interface BottomNavBarProps {
   activeTab: string;
@@ -16,28 +17,48 @@ export default function BottomNavBar({ activeTab, setActiveTab, language, isDark
     { id: 'settings', label: translateText('settings', language), icon: Settings },
   ];
 
+  const handleTabClick = (id: string) => {
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      try {
+        navigator.vibrate(50);
+      } catch (e) {
+        // ignore
+      }
+    }
+    setActiveTab(id);
+  };
+
   return (
-    <nav className="absolute bottom-4 left-4 right-4 z-40 bg-white/90 dark:bg-stone-900/90 backdrop-blur-lg shadow-[0_8px_32px_rgba(0,0,0,0.06)] border border-white/40 dark:border-stone-800/80 rounded-[24px] flex justify-around items-center py-2.5 px-3 transition-colors duration-300">
+    <nav className="absolute bottom-[calc(env(safe-area-inset-bottom)+10px)] left-1/2 -translate-x-1/2 w-[calc(100%-48px)] max-w-md h-[58px] z-40 bg-white/90 dark:bg-bottom-nav-surface backdrop-blur-lg shadow-lg dark:shadow-none border border-white/40 dark:border-subtle-border rounded-[22px] flex justify-around items-center px-2 py-1 transition-colors duration-300">
       {tabs.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeTab === tab.id;
         return (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => handleTabClick(tab.id)}
             id={`nav-btn-${tab.id}`}
-            className={`flex flex-col items-center justify-center py-1 px-3.5 rounded-2xl transition-all duration-300 scale-100 active:scale-95 ${
-              isActive
-                ? 'text-blue-600 dark:text-blue-400 font-semibold'
-                : 'text-gray-400 hover:text-gray-600 dark:text-stone-400 dark:hover:text-stone-200'
-            }`}
+            className="relative flex flex-col items-center justify-center min-w-[40px] min-h-[40px] rounded-xl w-full h-full mx-0.5 transition-colors duration-200"
           >
-            <Icon
-              size={20}
-              className={`mb-1 transition-transform duration-300 ${isActive ? 'scale-110 text-blue-600 dark:text-blue-400' : ''}`}
-              strokeWidth={isActive ? 2.5 : 2}
-            />
-            <span className="text-[11px] tracking-tight">{tab.label}</span>
+            {isActive && (
+              <motion.div
+                layoutId="active-nav-bg"
+                className="absolute inset-0.5 bg-blue-50/80 dark:bg-active-nav-surface rounded-lg"
+                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              />
+            )}
+            <motion.div
+              animate={isActive ? { scale: [0.95, 1.05, 1.0] } : { scale: 1.0 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              className={`relative z-10 flex flex-col items-center justify-center ${isActive ? 'text-blue-600 dark:text-brand-primary' : 'text-gray-400 dark:text-icon-inactive'}`}
+            >
+              <Icon
+                size={18}
+                className="mb-0.5"
+                strokeWidth={isActive ? 2.5 : 2}
+              />
+              <span className={`text-[10px] tracking-tight ${isActive ? 'font-semibold' : 'font-medium'}`}>{tab.label}</span>
+            </motion.div>
           </button>
         );
       })}

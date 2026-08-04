@@ -4,10 +4,25 @@
 @theme {
   --font-sans: "Inter", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
   --font-logo: "Fredoka", "Noto Sans", sans-serif;
+  
+  --color-app-bg: #0F131A;
+  --color-app-bar-bg: #151922;
+  --color-surface-primary: #1B202A;
+  --color-surface-secondary: #141821;
+  --color-bottom-nav-surface: #191D25;
+  --color-text-primary: #F7F9FC;
+  --color-text-secondary: #AAB3C2;
+  --color-text-tertiary: #7E8797;
+  --color-icon-inactive: #929BAC;
+  --color-brand-primary: #3D8CFF;
+  --color-brand-primary-light: #68A7FF;
+  --color-active-nav-surface: rgba(61,140,255,0.12);
+  --color-subtle-border: rgba(255,255,255,0.08);
 }
 
 /* Enable class-based dark mode in Tailwind v4 */
 @variant dark (&:where(.dark, .dark *));
+
 
 /* Custom Scrollbar hide utilities */
 .scrollbar-none::-webkit-scrollbar {

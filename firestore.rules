@@ -1,8 +1,78 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
     match /shared_plans/{planId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn();
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /destinations/{destId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /localEvents/{eventId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /destinationSearchCache/{cacheId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /holidayCache/{cacheId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /weatherCache/{cacheId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /weatherMetrics/{metricId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /route_cache/{cacheId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /flights/{flightId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /flightSchedules/{scheduleId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /flightRouteProfiles/{profileId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /flightMetrics/{metricId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /custom_stamps/{stampId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /default_stamps/{stampId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    match /eventSources/{sourceId} {
+      allow read: if true;
+      allow write: if isSignedIn();
     }
   }
 }

@@ -1,0 +1,15 @@
+--- src/App.tsx
++++ src/App.tsx
+@@ -502,12 +502,10 @@
+               />
+             </div>
+           )}
+         </main>
+-            </div>
+-          )}
++        {/* Persistent Bottom Control Area */}
++        <div className="flex-none flex flex-col">
+           <BottomNavBar 
+             activeTab={activeTab} 
+             setActiveTab={handleSetActiveTab} 
+             language={language}

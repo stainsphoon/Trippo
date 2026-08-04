@@ -1,0 +1,9 @@
+                        </div>
+                      </div>
+                    </div>
+
+                    {!isEditMode && (
+                      <div className="absolute top-2 right-2 z-50 flex items-center">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();

@@ -25,6 +25,8 @@ export default function SettingsTab({
   const [isSoundEnabled, setIsSoundEnabled] = useState(() => {
     return localStorage.getItem('trippo_sound') !== 'false';
   });
+  const [isConfirmingReset, setIsConfirmingReset] = useState(false);
+  const [showResetSuccess, setShowResetSuccess] = useState(false);
 
   const handleUsernameChange = (newVal: string) => {
     setUsername(newVal);
@@ -37,19 +39,12 @@ export default function SettingsTab({
     localStorage.setItem('trippo_sound', String(nextVal));
   };
 
-  const handleReset = () => {
-    if (confirm(translateText('reset_confirm', language))) {
-      onResetData();
-      alert(translateText('reset_success', language));
-    }
-  };
-
   const t = (key: Parameters<typeof translateText>[0]) => translateText(key, language);
 
   return (
     <div className="space-y-6">
       {/* User Profile Card */}
-      <section className="bg-white dark:bg-stone-900 rounded-3xl p-6 border border-gray-100 dark:border-stone-800 shadow-sm flex items-center gap-4 transition-colors duration-300">
+      <section className="bg-white dark:bg-stone-900 rounded-3xl p-6 border border-gray-50 dark:border-subtle-border shadow-sm flex items-center gap-4 transition-colors duration-300">
         <div className="w-16 h-16 rounded-full bg-blue-100 dark:bg-blue-950/50 flex items-center justify-center text-blue-600 dark:text-blue-400 relative overflow-hidden">
           <User size={30} strokeWidth={2} />
           <div className="absolute bottom-0 inset-x-0 bg-blue-600/10 dark:bg-blue-400/20 py-0.5 text-center">
@@ -79,7 +74,7 @@ export default function SettingsTab({
           {t('general_settings')}
         </h3>
 
-        <div className="bg-white dark:bg-stone-900 rounded-3xl border border-gray-100 dark:border-stone-800 shadow-sm divide-y divide-gray-150 dark:divide-stone-800 overflow-hidden transition-colors duration-300">
+        <div className="bg-white dark:bg-stone-900 rounded-3xl border border-gray-50 dark:border-subtle-border shadow-sm divide-y divide-gray-50 dark:divide-subtle-border overflow-hidden transition-colors duration-300">
           {/* Language setting with modern toggle pills */}
           <div className="flex justify-between items-center px-5 py-4">
             <div className="flex items-center gap-3">
@@ -175,7 +170,7 @@ export default function SettingsTab({
           {t('account_backup')}
         </h3>
 
-        <div className="bg-white dark:bg-stone-900 rounded-3xl border border-gray-100 dark:border-stone-800 shadow-sm divide-y divide-gray-150 dark:divide-stone-800 overflow-hidden transition-colors duration-300">
+        <div className="bg-white dark:bg-stone-900 rounded-3xl border border-gray-50 dark:border-subtle-border shadow-sm divide-y divide-gray-50 dark:divide-subtle-border overflow-hidden transition-colors duration-300">
           {/* Pro badge rewards */}
           <div className="flex justify-between items-center px-5 py-4">
             <div className="flex items-center gap-3">
@@ -190,21 +185,85 @@ export default function SettingsTab({
             <span className="font-sans text-xs font-bold text-amber-600 bg-amber-50 dark:bg-amber-950/40 px-2 py-1 rounded-lg">PRO MEMBER</span>
           </div>
 
-          {/* Reset All Data button */}
+          {/* Logout button */}
           <button
-            onClick={handleReset}
-            className="w-full text-left flex justify-between items-center px-5 py-4 hover:bg-rose-50/50 dark:hover:bg-rose-950/20 transition-colors"
+            onClick={() => {
+              import('../lib/firebase').then(({ auth }) => {
+                auth.signOut();
+              });
+            }}
+            className="w-full text-left flex justify-between items-center px-5 py-4 hover:bg-gray-50/50 dark:hover:bg-stone-800/50 transition-colors"
           >
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-xl bg-rose-50 dark:bg-rose-950/20 flex items-center justify-center text-rose-500">
-                <RotateCcw size={16} />
+              <div className="w-8 h-8 rounded-xl bg-gray-100 dark:bg-stone-800 flex items-center justify-center text-gray-500 dark:text-stone-400">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
               </div>
               <div>
-                <h4 className="font-sans font-semibold text-sm text-rose-600">{t('reset_data_title')}</h4>
-                <p className="font-sans text-[11px] text-gray-400 dark:text-stone-400">{t('reset_data_desc')}</p>
+                <h4 className="font-sans font-semibold text-sm text-gray-800 dark:text-stone-200">{language === 'ko' ? '로그아웃' : 'Log out'}</h4>
+                <p className="font-sans text-[11px] text-gray-400 dark:text-stone-400">{language === 'ko' ? '현재 계정에서 로그아웃합니다' : 'Sign out of your current account'}</p>
               </div>
             </div>
           </button>
+
+          {/* Reset All Data button */}
+          {!isConfirmingReset ? (
+            <button
+              onClick={() => setIsConfirmingReset(true)}
+              className="w-full text-left flex justify-between items-center px-5 py-4 hover:bg-rose-50/50 dark:hover:bg-rose-950/20 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-rose-50 dark:bg-rose-950/20 flex items-center justify-center text-rose-500">
+                  <RotateCcw size={16} />
+                </div>
+                <div>
+                  <h4 className="font-sans font-semibold text-sm text-rose-600">{t('reset_data_title')}</h4>
+                  <p className="font-sans text-[11px] text-gray-400 dark:text-stone-400">{t('reset_data_desc')}</p>
+                </div>
+              </div>
+            </button>
+          ) : (
+            <div className="px-5 py-4 bg-rose-50/10 dark:bg-rose-950/5 space-y-3">
+              <div className="flex items-start gap-3">
+                <div className="w-8 h-8 rounded-xl bg-rose-100/60 dark:bg-rose-950/30 flex items-center justify-center text-rose-600 shrink-0 mt-0.5 animate-pulse">
+                  <RotateCcw size={16} />
+                </div>
+                <div>
+                  <h4 className="font-sans font-bold text-sm text-rose-700 dark:text-rose-400">
+                    {language === 'ko' ? '정말 데이터를 초기화하시겠습니까?' : 'Confirm Data Reset'}
+                  </h4>
+                  <p className="font-sans text-xs text-rose-600/80 dark:text-rose-400/80 mt-1">
+                    {t('reset_confirm')}
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={() => setIsConfirmingReset(false)}
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold text-stone-600 dark:text-stone-300 bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors"
+                >
+                  {language === 'ko' ? '취소' : 'Cancel'}
+                </button>
+                <button
+                  onClick={() => {
+                    onResetData();
+                    setIsConfirmingReset(false);
+                    setShowResetSuccess(true);
+                    setTimeout(() => setShowResetSuccess(false), 4000);
+                  }}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 transition-colors shadow-sm animate-bounce-once"
+                >
+                  {language === 'ko' ? '초기화 실행' : 'Reset Data'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {showResetSuccess && (
+            <div className="mx-5 my-2 p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/20 text-emerald-800 dark:text-emerald-400 text-xs font-semibold flex items-center gap-2 border border-emerald-100 dark:border-emerald-900/20">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+              <span>{t('reset_success')}</span>
+            </div>
+          )}
         </div>
       </section>
 

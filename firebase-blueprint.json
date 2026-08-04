@@ -10,7 +10,151 @@
           "endDate": { "type": "string", "required": true },
           "durationText": { "type": "string", "required": true },
           "days": { "type": "array", "required": true },
+          "creatorId": { "type": "string", "required": false },
           "updatedAt": { "type": "timestamp", "required": true }
+        }
+      },
+      "users": {
+        "description": "Registered app users for companion discovery",
+        "fields": {
+          "uid": { "type": "string", "required": true },
+          "displayName": { "type": "string", "required": true },
+          "email": { "type": "string", "required": true },
+          "photoURL": { "type": "string", "required": false },
+          "updatedAt": { "type": "timestamp", "required": true }
+        }
+      },
+      "flightSchedules": {
+        "description": "Date-specific flight schedule cache",
+        "fields": {
+          "flightKey": { "type": "string", "required": true },
+          "airlineCode": { "type": "string", "required": true },
+          "flightNumber": { "type": "string", "required": true },
+          "departureDate": { "type": "string", "required": true },
+          "originAirportCode": { "type": "string", "required": true },
+          "destinationAirportCode": { "type": "string", "required": true },
+          "routeFingerprint": { "type": "string", "required": true },
+          "durationMinutes": { "type": "number", "required": true },
+          "stops": { "type": "number", "required": true },
+          "source": { "type": "string", "required": true },
+          "fetchedAt": { "type": "number", "required": true },
+          "verifiedAt": { "type": "number", "required": true },
+          "expiresAt": { "type": "number", "required": true },
+          "cacheVersion": { "type": "string", "required": true }
+        }
+      },
+      "flightRouteProfiles": {
+        "description": "Learned stable route profiles per flight key and season",
+        "fields": {
+          "profileId": { "type": "string", "required": true },
+          "flightKey": { "type": "string", "required": true },
+          "airlineCode": { "type": "string", "required": true },
+          "flightNumber": { "type": "string", "required": true },
+          "seasonName": { "type": "string", "required": false },
+          "validFrom": { "type": "string", "required": true },
+          "validTo": { "type": "string", "required": true },
+          "originAirportCode": { "type": "string", "required": true },
+          "destinationAirportCode": { "type": "string", "required": true },
+          "routeFingerprint": { "type": "string", "required": true },
+          "isStableRoute": { "type": "boolean", "required": true },
+          "invalidated": { "type": "boolean", "required": false },
+          "routeConfidence": { "type": "number", "required": true },
+          "sampleCount": { "type": "number", "required": true },
+          "sameRouteCount": { "type": "number", "required": true },
+          "typicalDurationMinutes": { "type": "number", "required": true },
+          "minDurationMinutes": { "type": "number", "required": true },
+          "maxDurationMinutes": { "type": "number", "required": true },
+          "lastVerifiedAt": { "type": "number", "required": true },
+          "nextVerificationAt": { "type": "number", "required": true }
+        }
+      },
+      "flightMetrics": {
+        "description": "API call and cache metrics monitoring",
+        "fields": {
+          "cacheHits": { "type": "number", "required": true },
+          "stableHits": { "type": "number", "required": true },
+          "apiCalls": { "type": "number", "required": true },
+          "apiFailures": { "type": "number", "required": true },
+          "manualInputs": { "type": "number", "required": true },
+          "updatedAt": { "type": "number", "required": true }
+        }
+      },
+      "destinations": {
+        "description": "Information about cities or regions used for search",
+        "fields": {
+          "id": { "type": "string", "required": true },
+          "name": { "type": "string", "required": true },
+          "country": { "type": "string", "required": true },
+          "description": { "type": "string", "required": false },
+          "latitude": { "type": "number", "required": true },
+          "longitude": { "type": "number", "required": true },
+          "placeId": { "type": "string", "required": true },
+          "updatedAt": { "type": "string", "required": true }
+        }
+      },
+      "localEvents": {
+        "description": "Verified local festivals, holidays, or events",
+        "fields": {
+          "id": { "type": "string", "required": true },
+          "destinationId": { "type": "string", "required": true },
+          "name": { "type": "string", "required": true },
+          "startDate": { "type": "string", "required": true },
+          "endDate": { "type": "string", "required": true },
+          "description": { "type": "string", "required": false },
+          "type": { "type": "string", "required": true },
+          "source": { "type": "string", "required": false },
+          "location": { "type": "string", "required": false },
+          "isRepresentative": { "type": "boolean", "required": true },
+          "congestionLevel": { "type": "string", "required": false },
+          "recommendationScore": { "type": "number", "required": false }
+        }
+      },
+      "destinationSearchCache": {
+        "description": "Cached search outputs for travel query results to avoid re-analysis",
+        "fields": {
+          "id": { "type": "string", "required": true },
+          "placeId": { "type": "string", "required": true },
+          "startDate": { "type": "string", "required": true },
+          "endDate": { "type": "string", "required": true },
+          "createdAt": { "type": "number", "required": true },
+          "weather": { "type": "object", "required": true },
+          "congestion": { "type": "object", "required": true },
+          "holidays": { "type": "array", "required": true },
+          "summary": { "type": "string", "required": true },
+          "summaryEn": { "type": "string", "required": false },
+          "recommendationScore": { "type": "number", "required": true }
+        }
+      },
+      "holidayCache": {
+        "description": "Cached national holidays per country and year",
+        "fields": {
+          "id": { "type": "string", "required": true },
+          "country": { "type": "string", "required": true },
+          "year": { "type": "number", "required": true },
+          "holidays": { "type": "array", "required": true },
+          "updatedAt": { "type": "number", "required": true }
+        }
+      },
+      "weatherCache": {
+        "description": "Cached seasonal weather stats per placeId and month",
+        "fields": {
+          "id": { "type": "string", "required": true },
+          "placeId": { "type": "string", "required": true },
+          "month": { "type": "number", "required": true },
+          "averageTemp": { "type": "number", "required": true },
+          "humidity": { "type": "number", "required": true },
+          "rainySeason": { "type": "string", "required": false },
+          "updatedAt": { "type": "number", "required": true }
+        }
+      },
+      "eventSources": {
+        "description": "Credibility index for event information sources",
+        "fields": {
+          "id": { "type": "string", "required": true },
+          "name": { "type": "string", "required": true },
+          "url": { "type": "string", "required": false },
+          "reliabilityScore": { "type": "number", "required": true },
+          "updatedAt": { "type": "number", "required": true }
         }
       }
     }

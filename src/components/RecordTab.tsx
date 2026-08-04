@@ -1,8 +1,12 @@
-import { useState, useRef, useEffect, ChangeEvent } from 'react';
-import { PenTool, CalendarCheck, MapPin, CalendarDays, Waves, Plus, Trash2, Image as ImageIcon, X, ArrowLeft, ChevronRight, FileText, Check, Clock, ChevronLeft, BookOpen, Globe, User, Upload } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Plus, X, BookOpen, Image as ImageIcon, SmilePlus, Upload, Trash2, PenTool, ChevronLeft, ChevronRight, CalendarDays, MapPin } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TravelLog, TravelPlan } from '../types';
+import { TravelLog, TravelPlan, CustomStamp, DraggableStamp } from '../types';
 import { Language, translateText } from '../utils/translations';
+import { RecordCard } from './RecordCard';
+import RecordEmptyState from './RecordEmptyState';
+import { getCustomStamps, addCustomStamp, deleteCustomStamp, getDefaultStamps } from '../services/stampService';
+import { CanvasEditor, EditorStamp } from './CanvasEditor';
 
 interface RecordTabProps {
   logs: TravelLog[];
@@ -15,15 +19,9 @@ interface RecordTabProps {
   isDarkMode?: boolean;
 }
 
-export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, onNavigateToPlan, plan, language = 'ko', isDarkMode = false }: RecordTabProps) {
-  const t = (key: Parameters<typeof translateText>[0], params?: Record<string, string | number>) => translateText(key, language, params);
-  // Passport specific states
-  const [isPassportOpen, setIsPassportOpen] = useState(false);
-  const [activeLogIndex, setActiveLogIndex] = useState(0); // 0 is Info page, 1..N are Logs
-  const [selectedLog, setSelectedLog] = useState<TravelLog | null>(null);
-  const [editingLog, setEditingLog] = useState<TravelLog | null>(null);
-  const [dragDirection, setDragDirection] = useState<'left' | 'right' | null>(null);
-
+export default function RecordTab({ logs = [], onAddLog, onDeleteLog, onUpdateLog, language = 'ko', isDarkMode = false }: RecordTabProps) {
+  const t = (key: Parameters<typeof translateText>[0]) => translateText(key, language);
+  
   // Draft Form states
   const [draftTitle, setDraftTitle] = useState('');
   const [draftContent, setDraftContent] = useState('');
@@ -31,67 +29,443 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
   const [draftDate, setDraftDate] = useState(new Date().toISOString().split('T')[0].replace(/-/g, '.'));
   const [draftImage, setDraftImage] = useState('');
   const [draftTag, setDraftTag] = useState('');
+  const [draftStamps, setDraftStamps] = useState<EditorStamp[]>([]);
   
-  // Custom Memory Scrapbook States
-  const [draftMood, setDraftMood] = useState('🥰 설렘');
-  const [draftWeather, setDraftWeather] = useState('☀️ 맑음');
-  const [draftAnecdote, setDraftAnecdote] = useState('');
-  const [draftBestBite, setDraftBestBite] = useState('');
-  const [draftVisitedSpots, setDraftVisitedSpots] = useState<string[]>([]);
-  const [availableSpots, setAvailableSpots] = useState<string[]>([]);
-  const [draftStickers, setDraftStickers] = useState<string[]>([]);
-
-  // Import Modal states
-  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
-  const [selectedImportPlan, setSelectedImportPlan] = useState<TravelPlan | null>(null);
-  const [isAddDropdownOpen, setIsAddDropdownOpen] = useState(false);
+  // Modal states
   const [isWriteModalOpen, setIsWriteModalOpen] = useState(false);
+  const [editingLog, setEditingLog] = useState<TravelLog | null>(null);
+  const [viewingLog, setViewingLog] = useState<TravelLog | null>(null);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
-  // Wheel tracking for MacBook trackpad horizontal swipes
-  const lastWheelTime = useRef<number>(0);
-
-  // Auto-open and focus on newly created stamps
-  const prevLogsLength = useRef(logs.length);
   useEffect(() => {
-    if (logs.length > prevLogsLength.current) {
-      setIsPassportOpen(true);
-      // Open the latest log index (logs.length because index 0 is Info page, so logs[logs.length-1] is index logs.length)
-      setActiveLogIndex(logs.length);
+    setIsConfirmingDelete(false);
+  }, [viewingLog]);
+
+  const [customStamps, setCustomStamps] = useState<CustomStamp[]>([]);
+  const [defaultStamps, setDefaultStamps] = useState<CustomStamp[]>([]);
+  const [isStampDrawerOpen, setIsStampDrawerOpen] = useState(false);
+
+  // iOS Photos-style Year Group view state
+  const [selectedYear, setSelectedYear] = useState<string | null>(null);
+  const [zoomDirection, setZoomDirection] = useState<'in' | 'out'>('in');
+  const [collapsingYear, setCollapsingYear] = useState<boolean>(false);
+
+  // Group logs by Year
+  const groupedByYear = React.useMemo(() => {
+    return logs.filter(Boolean).reduce((acc, log) => {
+      if (!log || !log.id) return acc;
+      const year = log.date ? (log.date.split('.')[0] || log.date.split('-')[0] || '2026') : '2026';
+      if (!acc[year]) {
+        acc[year] = [];
+      }
+      acc[year].push(log);
+      return acc;
+    }, {} as Record<string, TravelLog[]>);
+  }, [logs]);
+
+  const sortedYears = React.useMemo(() => {
+    return Object.keys(groupedByYear).sort((a, b) => b.localeCompare(a));
+  }, [groupedByYear]);
+
+  // Logs for the currently selected year
+  const currentYearLogs = React.useMemo(() => {
+    if (!selectedYear) return [];
+    return groupedByYear[selectedYear] || [];
+  }, [selectedYear, groupedByYear]);
+
+  // Touch pinch zoom gesture states
+  const [pinchScale, setPinchScale] = useState(1);
+  const [isPinching, setIsPinching] = useState(false);
+  const [touchDistance, setTouchDistance] = useState<number | null>(null);
+
+  // Automatically reset selectedYear if its logs become empty (e.g. deleted)
+  useEffect(() => {
+    if (selectedYear && (!groupedByYear[selectedYear] || groupedByYear[selectedYear].length === 0)) {
+      setZoomDirection('out');
+      setSelectedYear(null);
+      setCurrentIndex(0);
     }
-    prevLogsLength.current = logs.length;
-  }, [logs.length]);
+  }, [logs, selectedYear, groupedByYear]);
 
-  // Sample static images for quick selection (hotlinked from high quality ones provided)
-  const sampleImages = [
-    { name: '파리 에펠탑', url: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAo8E1CUWLqh5h5-RW4LTMTds36iv9SrH3YENHdWfPSNORN_A7R_yJUpRmIGUREKwiVl8t109wGxIkYhYWQgfzdkS5fbsjpwV1P7wqLDD0Ghre_vdVFttq7qcqHJSM3hN2I3QS92bosNC-Ei1LBps8FrOi2Cp4N3agWPKQgkDVi_kcTgj_JSZyClXvxGnvkfzeqZ6W5gCl_QITMOcnXfBs67y-pOdybURI5P4hQQWVzny6F8HK-jgsiEYcQc8yBUgOL0kGw36aMr6_g' },
-    { name: '도쿄 골목', url: 'https://lh3.googleusercontent.com/aida-public/AB6AXuCfPr6McA7a_VtAfeJrSYg93U6LtIj6szwoP3rf9CBwdRpFvcrFBSroQs-1metghR4G_dYx7YAeV2JFvArJRBE4z7Wz0rF0mSfFS36WYrQtxodwYw1Mn0XMR0ueTIeK82ReHHKadoA3Wrl5PnYOGVX0f8e1gZF_QLDX8FRF6Ba-KxIgyiepnwzDExk-pNggaSdho7UuY3YyMUUnYkIX2AqBGmWidLw2MJBijLwjZa6sZbjecOXUOVAWYabS12AppTibmwkMzYsGAuAo' },
-    { name: '보라카이 바다', url: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAWGj2W8QQZEcJENttTEWnT6iqUvk2UMneKIDrzr7-ohw7agq9tBG4ZZRGxYpO7w3smi9mpEF0vx563iKLpliig1l19w2a85l_cv_GWTdRUYqjI29fJzkYWBoycogSOGk8k1LKAbUuogwhVrcgazEZoVpZ1JzpSjwS8VwqQQAmjadT3B-T-3OeLQnLRmUrbzIvGbDLvC6UsEJmaD3LtVadjzFPlJMY2GOdm50_OMaOppvlGpxvn9dGs-UWbXclJDqUiMUJQpME2yhri' }
-  ];
+  // Carousel states
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentYearIndex, setCurrentYearIndex] = useState(0);
+  const [expandingYear, setExpandingYear] = useState<string | null>(null);
+  const [cardWidth, setCardWidth] = useState(300);
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window !== 'undefined' ? Math.min(window.innerWidth, 390) : 380);
+  const prevLogsLength = useRef(currentYearLogs.length);
+  const prevSelectedYear = useRef(selectedYear);
+  const skipNextTransition = useRef(true);
 
-  // Preset stickers for stamping and decorating
-  const PRESET_STICKERS = [
-    { id: 'stamp_pass', emoji: '🛂', label: 'APPROVED' },
-    { id: 'stamp_plane', emoji: '✈️', label: 'DEPARTURE' },
-    { id: 'stamp_camera', emoji: '📸', label: 'MEMORY' },
-    { id: 'stamp_star', emoji: '⭐️', label: 'FAVORITE' },
-    { id: 'stamp_food', emoji: '😋', label: 'YUMMY!' },
-    { id: 'stamp_heart', emoji: '💖', label: 'LOVE IT' },
-    { id: 'stamp_clover', emoji: '🍀', label: 'LUCKY' },
-    { id: 'stamp_ticket', emoji: '🎟️', label: 'ADMIT ONE' },
-    { id: 'stamp_coffee', emoji: '☕', label: 'RELAX' }
-  ];
+  // Single-touch tracking for swipe guesture
+  const touchStartX = useRef<number | null>(null);
+  const touchStartY = useRef<number | null>(null);
 
-  const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === 'string') {
-          setDraftImage(reader.result);
+  // Wheel accumulation for trackpad/mouse horizontal swipes
+  const wheelAccumulator = useRef(0);
+  const lastWheelTime = useRef(0);
+
+  // Refs for native scroll snap containers
+  const yearsScrollRef = useRef<HTMLDivElement>(null);
+  const logsScrollRef = useRef<HTMLDivElement>(null);
+
+  // Mouse drag scrolling state
+  const isDraggingMouse = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartScrollLeft = useRef(0);
+
+  // Scrolling active state to prevent programmatic centering from fighting user gestures
+  const isScrollingActive = useRef(false);
+  const scrollActiveTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  const markScrollActive = () => {
+    isScrollingActive.current = true;
+    if (scrollActiveTimeout.current) {
+      clearTimeout(scrollActiveTimeout.current);
+    }
+    scrollActiveTimeout.current = setTimeout(() => {
+      isScrollingActive.current = false;
+    }, 150);
+  };
+
+  // Synchronize Years scroll container with currentYearIndex
+  useEffect(() => {
+    if (selectedYear === null && yearsScrollRef.current) {
+      if (isScrollingActive.current) return;
+      const step = cardWidth + 16;
+      const targetScrollLeft = currentYearIndex * step;
+      if (Math.abs(yearsScrollRef.current.scrollLeft - targetScrollLeft) > 5) {
+        yearsScrollRef.current.scrollTo({
+          left: targetScrollLeft,
+          behavior: 'smooth'
+        });
+      }
+    }
+  }, [currentYearIndex, selectedYear, cardWidth]);
+
+  // Synchronize Logs scroll container with currentIndex
+  useEffect(() => {
+    if (selectedYear !== null && logsScrollRef.current) {
+      if (isScrollingActive.current) return;
+      const step = cardWidth + 16;
+      const targetScrollLeft = currentIndex * step;
+      if (Math.abs(logsScrollRef.current.scrollLeft - targetScrollLeft) > 5) {
+        logsScrollRef.current.scrollTo({
+          left: targetScrollLeft,
+          behavior: 'smooth'
+        });
+      }
+    }
+  }, [currentIndex, selectedYear, cardWidth]);
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    isDraggingMouse.current = true;
+    dragStartX.current = e.clientX;
+    dragStartScrollLeft.current = e.currentTarget.scrollLeft;
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDraggingMouse.current) return;
+    e.preventDefault();
+    const x = e.clientX;
+    const walk = (x - dragStartX.current) * 1.5;
+    e.currentTarget.scrollLeft = dragStartScrollLeft.current - walk;
+  };
+
+  const handleMouseUpOrLeave = (e: React.MouseEvent<HTMLDivElement>, type: 'years' | 'logs') => {
+    if (!isDraggingMouse.current) return;
+    isDraggingMouse.current = false;
+    
+    const scrollLeft = e.currentTarget.scrollLeft;
+    const step = cardWidth + 16;
+    const index = Math.round(scrollLeft / step);
+    
+    const maxIndex = type === 'years' 
+      ? sortedYears.length - 1 
+      : currentYearLogs.filter(l => l && l.id).length - 1;
+      
+    const clampedIndex = Math.max(0, Math.min(maxIndex, index));
+    
+    e.currentTarget.scrollTo({
+      left: clampedIndex * step,
+      behavior: 'smooth'
+    });
+  };
+
+  const handleYearsScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    markScrollActive();
+    const scrollLeft = e.currentTarget.scrollLeft;
+    const step = cardWidth + 16;
+    const index = Math.round(scrollLeft / step);
+    const clampedIndex = Math.max(0, Math.min(sortedYears.length - 1, index));
+    if (clampedIndex !== currentYearIndex) {
+      setCurrentYearIndex(clampedIndex);
+    }
+  };
+
+  const handleLogsScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    markScrollActive();
+    const scrollLeft = e.currentTarget.scrollLeft;
+    const step = cardWidth + 16;
+    const validLogs = currentYearLogs.filter(l => l && l.id);
+    const index = Math.round(scrollLeft / step);
+    const clampedIndex = Math.max(0, Math.min(validLogs.length - 1, index));
+    if (clampedIndex !== currentIndex) {
+      setCurrentIndex(clampedIndex);
+    }
+  };
+
+  useEffect(() => {
+    // Skip the initial positioning animation on tab switch / mount
+    const timer = setTimeout(() => {
+      skipNextTransition.current = false;
+    }, 100);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const viewportObserverRef = useRef<ResizeObserver | null>(null);
+  const viewportRef = useCallback((node: HTMLDivElement | null) => {
+    if (viewportObserverRef.current) {
+      viewportObserverRef.current.disconnect();
+      viewportObserverRef.current = null;
+    }
+    if (node !== null) {
+      setViewportWidth(node.getBoundingClientRect().width);
+      const observer = new ResizeObserver((entries) => {
+        for (let entry of entries) {
+          setViewportWidth(entry.contentRect.width);
         }
-      };
-      reader.readAsDataURL(file);
+      });
+      observer.observe(node);
+      viewportObserverRef.current = observer;
     }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (viewportObserverRef.current) {
+        viewportObserverRef.current.disconnect();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateWidth = () => {
+      if (window.innerWidth >= 640) {
+        setCardWidth(400);
+      } else if (window.innerWidth >= 480) {
+        setCardWidth(310);
+      } else {
+        setCardWidth(270);
+      }
+    };
+    updateWidth();
+    window.addEventListener('resize', updateWidth);
+    return () => window.removeEventListener('resize', updateWidth);
+  }, []);
+
+  useEffect(() => {
+    if (prevSelectedYear.current !== selectedYear) {
+      prevSelectedYear.current = selectedYear;
+      prevLogsLength.current = currentYearLogs.length;
+      return;
+    }
+
+    if (currentYearLogs.length > prevLogsLength.current) {
+      setCurrentIndex(currentYearLogs.length - 1);
+    } else if (currentIndex >= currentYearLogs.length && currentYearLogs.length > 0) {
+      setCurrentIndex(currentYearLogs.length - 1);
+    }
+
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      try {
+        navigator.vibrate(20);
+      } catch (e) {
+        // ignore
+      }
+    }
+    
+    prevLogsLength.current = currentYearLogs.length;
+  }, [currentYearLogs.length, currentIndex, selectedYear]);
+
+  // Gesture events
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      setTouchDistance(dist);
+      setIsPinching(true);
+    } else if (e.touches.length === 1) {
+      touchStartX.current = e.touches[0].clientX;
+      touchStartY.current = e.touches[0].clientY;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2 && touchDistance !== null) {
+      const currentDist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const scale = currentDist / touchDistance;
+      setPinchScale(scale);
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (isPinching) {
+      if (selectedYear !== null && pinchScale < 0.82) {
+        // Pinch in -> Zoom out back to Years Grid View
+        setZoomDirection('out');
+        setCollapsingYear(true);
+        if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+          navigator.vibrate(20);
+        }
+        setTimeout(() => {
+          setSelectedYear(null);
+          setCurrentIndex(0);
+          setCollapsingYear(false);
+        }, 180);
+      } else if (selectedYear === null && pinchScale > 1.18) {
+        // Pinch out -> Zoom into the most recent year
+        if (sortedYears.length > 0) {
+          setZoomDirection('in');
+          setSelectedYear(sortedYears[0]);
+          setCurrentIndex(0);
+          if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+            navigator.vibrate(20);
+          }
+        }
+      }
+      setTouchDistance(null);
+      setPinchScale(1);
+      setIsPinching(false);
+    }
+    touchStartX.current = null;
+    touchStartY.current = null;
+  };
+
+  useEffect(() => {
+    const fetchStamps = async () => {
+      const [custom, defaults] = await Promise.all([
+        getCustomStamps(),
+        getDefaultStamps()
+      ]);
+      setCustomStamps(custom);
+      setDefaultStamps(defaults);
+    };
+    fetchStamps();
+  }, []);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const stampInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAddStampToCanvas = (imageUrl: string) => {
+    const img = new Image();
+    img.src = imageUrl;
+    img.onload = () => {
+      const aspectRatio = img.naturalWidth / img.naturalHeight;
+      const baseSize = 80;
+      let w = baseSize;
+      let h = baseSize;
+      if (aspectRatio > 1) {
+        h = baseSize / aspectRatio;
+      } else {
+        w = baseSize * aspectRatio;
+      }
+
+      const newStamp: EditorStamp = {
+        id: Date.now().toString() + Math.random().toString(),
+        imageUrl,
+        x: 20 + (draftStamps.length * 10),
+        y: 20 + (draftStamps.length * 10),
+        w,
+        h
+      };
+      setDraftStamps(prev => [...prev, newStamp]);
+    };
+  };
+
+  // Helpers for plan importing
+  const cleanLocation = (title: string) => {
+    return title.replace(/여행\s*계획|여행|계획/g, '').trim() || title;
+  };
+
+  const sanitizeDate = (dateStr: string) => {
+    return dateStr.replace(/\s+/g, '').replace(/[-/]/g, '.');
+  };
+
+  const generatePlanSummary = (p: TravelPlan, lang: Language) => {
+    let summary = lang === 'ko' 
+      ? `✈️ [${p.title}] 여행 기록\n\n🗓️ 여행 일정: ${p.startDate} ~ ${p.endDate} (${p.durationText})\n\n🗺️ 일자별 경로 요약:\n`
+      : `✈️ [${p.title}] Travel Journal\n\n🗓️ Period: ${p.startDate} ~ ${p.endDate} (${p.durationText})\n\n🗺️ Daily Itinerary Summary:\n`;
+
+    p.days.forEach(day => {
+      const dayHeader = lang === 'ko'
+        ? `• Day ${day.dayNumber} (${day.date} ${day.dayOfWeek}요일):\n`
+        : `• Day ${day.dayNumber} (${day.date} ${day.dayOfWeek}):\n`;
+      
+      summary += dayHeader;
+      if (day.items && day.items.length > 0) {
+        day.items.forEach(item => {
+          summary += `   - [${item.time}] ${item.title}`;
+          if (item.content) {
+            summary += ` : ${item.content}`;
+          }
+          summary += '\n';
+        });
+      } else {
+        summary += lang === 'ko' ? `   - 등록된 일정이 없습니다.\n` : `   - No scheduled activities.\n`;
+      }
+      summary += '\n';
+    });
+    
+    summary += lang === 'ko'
+      ? `✍️ 이 일정을 바탕으로 소중한 여행 이야기를 자유롭게 기록해 보세요!`
+      : `✍️ Feel free to write your precious travel stories based on this itinerary!`;
+
+    return summary;
+  };
+
+  const getPlansHistory = (): TravelPlan[] => {
+    const saved = localStorage.getItem('trippo_plans_history');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (e) {
+        console.error("Failed to parse trippo_plans_history:", e);
+      }
+    }
+    // Fallback to active plan if present
+    const activePlanSaved = localStorage.getItem('trippo_plan');
+    if (activePlanSaved) {
+      try {
+        const active = JSON.parse(activePlanSaved);
+        if (active) return [active];
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    return [];
+  };
+
+  const [isChoiceModalOpen, setIsChoiceModalOpen] = useState(false);
+  const [isPlanListModalOpen, setIsPlanListModalOpen] = useState(false);
+
+  const handleStartAdd = () => {
+    setEditingLog(null);
+    setDraftTitle('');
+    setDraftContent('');
+    setDraftLocation('');
+    setDraftDate(new Date().toISOString().split('T')[0].replace(/-/g, '.'));
+    setDraftImage('');
+    setDraftTag('');
+    setDraftStamps([]);
+    setIsStampDrawerOpen(false);
+    setIsChoiceModalOpen(true);
   };
 
   const handleStartEdit = (log: TravelLog) => {
@@ -101,49 +475,88 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
     setDraftDate(log.date);
     setDraftImage(log.image || '');
     setDraftTag(log.tag || '');
-
-    let scrapbookData: any = null;
-    let isScrapbook = false;
-    if (log.content && log.content.startsWith('{')) {
-      try {
-        scrapbookData = JSON.parse(log.content);
-        isScrapbook = true;
-      } catch (e) {}
-    }
-
-    if (isScrapbook && scrapbookData) {
-      setDraftContent(scrapbookData.story || '');
-      setDraftMood(scrapbookData.mood || '🥰 설렘');
-      setDraftWeather(scrapbookData.weather || '☀️ 맑음');
-      setDraftAnecdote(scrapbookData.anecdote || '');
-      setDraftBestBite(scrapbookData.bestBite || '');
-      setDraftVisitedSpots(scrapbookData.visitedSpots || []);
-      setDraftStickers(scrapbookData.stickers || []);
-    } else {
-      setDraftContent(log.content || '');
-      setDraftMood('🥰 설렘');
-      setDraftWeather('☀️ 맑음');
-      setDraftAnecdote('');
-      setDraftBestBite('');
-      setDraftVisitedSpots([]);
-      setDraftStickers([]);
-    }
-
-    if (plan) {
-      const spots: string[] = [];
-      for (const day of plan.days) {
-        for (const item of day.items) {
-          spots.push(item.title);
-        }
+    setDraftContent(log.content || '');
+    setDraftStamps((Array.isArray(log.stamps) ? log.stamps : []).filter(Boolean).map((s, i) => {
+      if (typeof s === 'string') {
+        return { id: `legacy-${i}`, imageUrl: s, x: 20 + i*10, y: 20 + i*10, w: 40, h: 40 } as any;
       }
-      const uniqueSpots = Array.from(new Set(spots));
-      setAvailableSpots(uniqueSpots);
-    } else {
-      setAvailableSpots([]);
-    }
-
-    setSelectedLog(null);
+      return {
+        ...s,
+        id: s.id !== undefined && s.id !== null ? String(s.id) : `stamp-${i}`
+      };
+    }));
+    setIsStampDrawerOpen(false);
     setIsWriteModalOpen(true);
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const img = new Image();
+        img.src = reader.result as string;
+        img.onload = () => {
+          const aspectRatio = img.naturalWidth / img.naturalHeight;
+          const baseSize = 120; // larger for photos
+          let w = baseSize;
+          let h = baseSize;
+          if (aspectRatio > 1) {
+            h = baseSize / aspectRatio;
+          } else {
+            w = baseSize * aspectRatio;
+          }
+
+          const newStamp: EditorStamp = {
+            id: Date.now().toString() + Math.random().toString(),
+            imageUrl: reader.result as string,
+            x: 20 + (draftStamps.length * 10),
+            y: 20 + (draftStamps.length * 10),
+            w,
+            h
+          };
+          setDraftStamps(prev => [...prev, newStamp]);
+        };
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleStampUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64Img = reader.result as string;
+        const newStamp = await addCustomStamp(base64Img);
+        if (newStamp) {
+           setCustomStamps(prev => [newStamp, ...prev]);
+           handleAddStampToCanvas(newStamp.imageUrl);
+        } else {
+           alert("Failed to upload stamp.");
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+    // reset so same file can be uploaded again if needed
+    if (e.target) {
+        e.target.value = '';
+    }
+  };
+
+  const handleDeleteCustomStamp = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const success = await deleteCustomStamp(id);
+    if (success) {
+      setCustomStamps(prev => prev.filter(s => s.id !== id));
+    }
+  };
+
+  const getCleanStamps = () => {
+    return draftStamps.map(s => {
+      const { imageObj, ...rest } = s as any;
+      return rest;
+    });
   };
 
   const handleSave = () => {
@@ -152,38 +565,35 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
       return;
     }
 
-    // Pack rich scrapbook memories together in structured JSON!
-    const scrapbookData = {
-      story: draftContent,
-      mood: draftMood,
-      weather: draftWeather,
-      anecdote: draftAnecdote,
-      bestBite: draftBestBite,
-      visitedSpots: draftVisitedSpots,
-      stickers: draftStickers
-    };
+    const cleanedStamps = getCleanStamps();
 
+    const savedYear = draftDate ? (draftDate.split('.')[0] || draftDate.split('-')[0] || '2026') : '2026';
     if (editingLog) {
       onUpdateLog({
-        id: editingLog.id,
+        ...editingLog,
         title: draftTitle,
-        content: JSON.stringify(scrapbookData),
+        content: draftContent,
         location: draftLocation || undefined,
         date: draftDate,
         image: draftImage || undefined,
-        tag: draftTag || undefined
+        tag: draftTag || undefined,
+        stamps: cleanedStamps.length > 0 ? cleanedStamps : undefined
       });
       setEditingLog(null);
     } else {
       onAddLog({
         title: draftTitle,
-        content: JSON.stringify(scrapbookData),
+        content: draftContent,
         location: draftLocation || undefined,
         date: draftDate,
         image: draftImage || undefined,
-        tag: draftTag || undefined
+        tag: draftTag || undefined,
+        stamps: cleanedStamps.length > 0 ? cleanedStamps : undefined
       });
     }
+    setZoomDirection('in');
+    setSelectedYear(savedYear);
+    setCurrentIndex(0);
 
     // Reset states
     setDraftTitle('');
@@ -191,1296 +601,890 @@ export default function RecordTab({ logs, onAddLog, onDeleteLog, onUpdateLog, on
     setDraftLocation('');
     setDraftImage('');
     setDraftTag('');
-    setDraftMood('🥰 설렘');
-    setDraftWeather('☀️ 맑음');
-    setDraftAnecdote('');
-    setDraftBestBite('');
-    setDraftVisitedSpots([]);
-    setAvailableSpots([]);
-    setDraftStickers([]);
+    setDraftStamps([]);
     setIsWriteModalOpen(false);
-    
-    const successMsg = editingLog
-      ? (language === 'ko' ? '소중한 여행의 기억이 아름답게 수정되었습니다! 💖' : 'Your precious memories have been edited beautifully! 💖')
-      : t('alert_save_success');
-    alert(successMsg);
-  };
-
-  const handleImportPlan = (p: TravelPlan) => {
-    // Populate draft states
-    setDraftTitle(language === 'ko' ? `${p.title} 추억 저장` : `Memories of ${p.title}`);
-    
-    // Convert e.g., "2024. 10. 15" -> "2024.10.15" or keep clean
-    const cleanDate = p.startDate.replace(/\s+/g, '');
-    setDraftDate(cleanDate);
-    
-    const loc = p.title.replace(' 여행 계획', '').replace(' 계획', '').trim();
-    setDraftLocation(loc);
-
-    // Find first image in the items
-    let firstImage = '';
-    const spots: string[] = [];
-    for (const day of p.days) {
-      for (const item of day.items) {
-        spots.push(item.title);
-        if (item.images && item.images.length > 0 && !firstImage) {
-          firstImage = item.images[0];
-        }
-      }
-    }
-    setDraftImage(firstImage);
-    setDraftTag(language === 'ko' ? '계획추억' : 'PlannedMemory');
-    
-    const uniqueSpots = Array.from(new Set(spots));
-    setAvailableSpots(uniqueSpots);
-    setDraftVisitedSpots(uniqueSpots); // Precheck all spots by default so users can select/customize!
-
-    setDraftMood(language === 'ko' ? '🤩 신남' : '🤩 Thrilled');
-    setDraftWeather(language === 'ko' ? '☀️ 맑음' : '☀️ Sunny');
-    setDraftAnecdote('');
-    setDraftBestBite('');
-    setDraftContent(language === 'ko' 
-      ? `계획했던 ${p.title} 여행을 마친 후 느낀 사소한 기쁨이나 잊지 못할 추억을 가득 적어보세요.`
-      : `Write down small pleasures or unforgettable memories from your trip to ${p.title}.`);
-
-    setIsImportModalOpen(false);
-    setSelectedImportPlan(null);
-    setIsWriteModalOpen(true); // Open the write editor modal directly!
+    alert(language === 'ko' ? '기록이 저장되었습니다!' : 'Record saved!');
   };
 
   return (
-    <div className="space-y-8">
-      {/* Interactive Passport Book Section */}
-      <section className="space-y-4">
-        <div className="flex items-center justify-between relative pb-1">
-          <h3 className="font-sans font-black text-xl text-stone-800 flex items-center gap-2">
-            <BookOpen className="text-[#3b82f6]" size={24} />
-            <span>{language === 'ko' ? '나의 여행 여권' : 'My Travel Passport'}</span>
-          </h3>
-          <div className="flex items-center gap-2">
-            {/* The + Button for adding logs */}
-            <div className="relative">
-              <button
-                onClick={() => setIsAddDropdownOpen(!isAddDropdownOpen)}
-                className="w-10 h-10 bg-[#3b82f6] hover:bg-blue-600 text-white rounded-full flex items-center justify-center shadow-md active:scale-95 transition-all z-40 relative"
-                title={language === 'ko' ? '기록 추가하기' : 'Add Record'}
+    <div className="flex flex-col h-full -mt-2">
+      <div className="flex items-center justify-between px-1 mb-2">
+        <h3 className="font-logo font-bold text-[22px] text-stone-900 dark:text-text-primary flex items-center gap-2">
+          <BookOpen className="text-blue-500 dark:text-brand-primary" size={24} />
+          <span>{language === 'ko' ? '여행 기록' : 'Travel Logs'}</span>
+        </h3>
+        <motion.button
+          onClick={handleStartAdd}
+          whileTap={{ scale: 0.94 }}
+          transition={{ type: "spring", stiffness: 400, damping: 17 }}
+          className="bg-blue-500 dark:bg-brand-primary text-white text-xs font-bold py-1.5 px-3.5 rounded-full flex items-center gap-1 shadow-sm hover:bg-blue-600 dark:hover:bg-brand-primary/90 transition-all active:scale-95"
+        >
+          <Plus size={14} />
+          <span>{language === 'ko' ? '기록 추가' : 'Add Log'}</span>
+        </motion.button>
+      </div>
+
+      {logs.filter(Boolean).length === 0 ? (
+        <RecordEmptyState language={language} />
+      ) : (
+        <div 
+          ref={viewportRef}
+          className="flex-1 flex flex-col min-h-0 select-none relative"
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          style={{
+            transform: isPinching ? `scale(${pinchScale})` : 'scale(1)',
+            transition: isPinching ? 'none' : 'transform 0.25s cubic-bezier(0.16, 1, 0.3, 1)'
+          }}
+        >
+          <AnimatePresence mode="popLayout" initial={false}>
+            {selectedYear === null ? (
+              <motion.div
+                key="years-carousel"
+                initial={{ opacity: 0, scale: zoomDirection === 'out' ? 1.15 : 0.92, filter: 'blur(2px)' }}
+                animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
+                exit={{ opacity: 0, scale: zoomDirection === 'in' ? 1.15 : 0.92, filter: 'blur(4px)' }}
+                transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
+                className="w-full h-full flex-1 flex flex-col min-h-0 origin-center"
               >
-                <Plus size={22} className={`transition-transform duration-200 ${isAddDropdownOpen ? 'rotate-45' : ''}`} />
-              </button>
-              
-              {/* Dropdown menu */}
-              <AnimatePresence>
-                {isAddDropdownOpen && (
-                  <>
-                    {/* Backdrop to close */}
-                    <div className="fixed inset-0 z-35" onClick={() => setIsAddDropdownOpen(false)} />
-                    <motion.div
-                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                      className="absolute right-0 mt-2 w-48 bg-white border border-stone-200 rounded-2xl shadow-xl py-1.5 z-40"
-                    >
-                      <button
-                        onClick={() => {
-                          setIsAddDropdownOpen(false);
-                          setIsWriteModalOpen(true);
-                        }}
-                        className="w-full px-4 py-3 text-left hover:bg-stone-50 flex items-center gap-2.5 font-sans text-xs font-bold text-stone-700 transition-colors"
-                      >
-                        <PenTool size={15} className="text-blue-500" />
-                        <span>{language === 'ko' ? '✍️ 새로 기록하기' : '✍️ Write New Memory'}</span>
-                      </button>
-                      <button
-                        onClick={() => {
-                          setIsAddDropdownOpen(false);
-                          setIsImportModalOpen(true);
-                        }}
-                        className="w-full px-4 py-3 text-left hover:bg-stone-50 flex items-center gap-2.5 font-sans text-xs font-bold text-stone-700 transition-colors"
-                      >
-                        <CalendarCheck size={15} className="text-emerald-500" />
-                        <span>{language === 'ko' ? '📂 계획에서 불러오기' : '📂 Import from Plan'}</span>
-                      </button>
-                    </motion.div>
-                  </>
-                )}
-              </AnimatePresence>
-            </div>
-
-            {isPassportOpen && (
-              <button
-                onClick={() => setIsPassportOpen(false)}
-                className="text-xs font-bold text-stone-600 bg-stone-100 hover:bg-stone-200 px-3 py-2 rounded-xl transition-all active:scale-95 flex items-center gap-1 h-10"
-              >
-                {language === 'ko' ? '여권 닫기' : 'Close Passport'}
-              </button>
-            )}
-          </div>
-        </div>
-
-        <AnimatePresence mode="wait">
-          {!isPassportOpen ? (
-            // PASSPORT COVER (Pastel Sage Green Style - No dynamic cover animations)
-            <div
-              key="passport-cover"
-              onClick={() => setIsPassportOpen(true)}
-              className="relative overflow-hidden w-full max-w-[320px] mx-auto aspect-[3/4.2] rounded-[32px] bg-[#dbebe1] border-4 border-stone-800 shadow-2xl flex flex-col justify-between p-6 select-none cursor-pointer active:opacity-95"
-            >
-              {/* Subtle Grid Diary Paper Background Pattern */}
-              <div className="absolute inset-0 opacity-[0.03] pointer-events-none select-none bg-[linear-gradient(to_right,#1c1917_1px,transparent_1px),linear-gradient(to_bottom,#1c1917_1px,transparent_1px)] bg-[size:16px_16px]" />
-
-              {/* Passport Spine (Stitch / Binder scrapbook style) */}
-              <div className="absolute left-0 top-0 bottom-0 w-5 bg-stone-800/5 border-r-3 border-dashed border-stone-800/20 z-10" />
-
-              {/* Top Text / Logo (Bubble Style with crisp thick black stroke like sticker) */}
-              <div className="text-center mt-3 space-y-1.5 z-10 flex flex-col items-center pl-4">
-                <h4 
-                  className="font-sans font-black text-5xl text-[#5da3f4] tracking-wide select-none filter drop-shadow-[0_2.5px_0_rgba(28,55,103,1)]"
+                {/* Main Years Carousel Area */}
+                <div 
+                  ref={yearsScrollRef}
+                  onScroll={handleYearsScroll}
+                  onMouseDown={handleMouseDown}
+                  onMouseMove={handleMouseMove}
+                  onMouseUp={(e) => handleMouseUpOrLeave(e, 'years')}
+                  onMouseLeave={(e) => handleMouseUpOrLeave(e, 'years')}
+                  className="flex-1 min-h-0 w-full overflow-x-auto snap-x snap-mandatory scrollbar-none py-2 flex items-center cursor-grab active:cursor-grabbing gap-4"
                   style={{
-                    WebkitTextStroke: "2.5px #1c1917",
-                    paintOrder: "stroke fill"
+                    paddingLeft: `${(viewportWidth - cardWidth) / 2}px`,
+                    paddingRight: '0px',
+                    scrollPaddingLeft: `${(viewportWidth - cardWidth) / 2}px`,
+                    scrollPaddingRight: `${(viewportWidth - cardWidth) / 2}px`
                   }}
                 >
-                  Trippo
-                </h4>
-                <p className="font-sans font-extrabold tracking-[0.2em] text-[#3d6052] text-[10px] uppercase">
-                  Travel Passport
-                </p>
-              </div>
+                  {sortedYears.map((year, index) => {
+                    const isActive = index === currentYearIndex;
+                    const yearLogs = groupedByYear[year] || [];
+                    const locations = Array.from(new Set(yearLogs.map(l => l.location || l.title.split(' ')[0]).filter(Boolean))).slice(0, 3);
 
-              {/* Minimalist Globe Stamp Emblem in center - Static, no spin animations */}
-              <div className="flex flex-col items-center justify-center py-4 z-10 pl-4">
-                <div className="relative w-40 h-40 rounded-full border-4 border-stone-800 bg-white/40 flex items-center justify-center shadow-md">
-                  <div className="absolute inset-2 border-2 border-dashed border-stone-800/15 rounded-full pointer-events-none" />
-                  <div className="w-24 h-24 rounded-full border-3 border-stone-800 bg-white flex flex-col items-center justify-center shadow-inner">
-                    <Globe className="text-[#4a7865] w-12 h-12" strokeWidth={2.5} />
-                    <span className="font-mono text-[6px] text-stone-400 font-bold tracking-widest mt-1">JOURNAL</span>
-                  </div>
-                  {/* Clean badge accent */}
-                  <div className="absolute text-stone-900 text-[9px] font-black tracking-widest bg-[#fbbf24] border-2 border-stone-800 px-3 py-0.5 rounded-lg shadow-sm bottom-4">
-                    EST. 2026
-                  </div>
-                </div>
-              </div>
-
-              {/* Cute scrapbook stickers to make it extra casual & decorative */}
-              <div className="absolute top-[38%] left-8 bg-[#f87171] text-white border-2 border-stone-800 rounded-lg px-2 py-0.5 text-[8px] font-bold tracking-widest font-sans uppercase -rotate-12 shadow-sm select-none">
-                SEOUL
-              </div>
-              <div className="absolute bottom-[35%] right-6 bg-[#34d399] text-stone-800 border-2 border-stone-800 rounded-full w-9 h-9 flex items-center justify-center text-xs font-bold rotate-12 shadow-sm select-none">
-                ✈️
-              </div>
-              <div className="absolute bottom-16 left-12 bg-[#fbbf24] text-stone-900 border-2 border-stone-800 rounded-lg px-1.5 py-0.5 text-[7px] font-black uppercase rotate-[15deg] shadow-sm select-none">
-                BOARDING
-              </div>
-
-              {/* Bottom Text / Touch cue - Simple and static */}
-              <div className="text-center mb-1 space-y-1.5 z-10 pl-4">
-                <div className="inline-flex items-center gap-1.5 bg-[#4a7865]/10 text-[#4a7865] px-4 py-2 rounded-2xl border border-[#4a7865]/20 text-xs font-black shadow-sm bg-white">
-                  <span>{language === 'ko' ? '여권 열어보기' : 'Open Passport'}</span>
-                  <span>📖</span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            // PASSPORT OPENED
-            <motion.div
-              key="passport-opened"
-              initial={{ opacity: 0, scale: 0.95, rotateY: -90 }}
-              animate={{ opacity: 1, scale: 1, rotateY: 0 }}
-              exit={{ opacity: 0, scale: 0.95, rotateY: -10 }}
-              transition={{ duration: 0.4 }}
-              className="w-full bg-[#4d3c2e] p-2.5 rounded-3xl border border-stone-800 shadow-2xl relative"
-            >
-              {/* Spine shadow overlay */}
-              <div className="absolute left-[24px] top-4 bottom-4 w-[1px] bg-black/30 z-20 pointer-events-none" />
-
-              {/* Inside paper (Supports trackpad horizontal swipes on MacBook with stable sensitivity) */}
-              <div 
-                onWheel={(e) => {
-                  // Only swipe on dominant horizontal trackpad gestures with a higher, stable threshold (e.g. 35) to prevent hypersensitivity
-                  if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 35) {
-                    const now = Date.now();
-                    if (now - lastWheelTime.current > 700) {
-                      if (e.deltaX > 35) {
-                        // Swiped trackpad left -> go to next page
-                        if (activeLogIndex < logs.length) {
-                          setDragDirection('left');
-                          setActiveLogIndex((prev) => prev + 1);
-                          lastWheelTime.current = now;
+                    return (
+                      <motion.div
+                        key={year}
+                        style={{ width: cardWidth }}
+                        className="flex-shrink-0 origin-center flex flex-col justify-center snap-center"
+                        animate={
+                          expandingYear === year
+                            ? { scale: 1.25, opacity: 0, filter: 'blur(2px)' }
+                            : expandingYear !== null
+                            ? { scale: 0.8, opacity: 0, filter: 'blur(4px)' }
+                            : {
+                                scale: isActive ? 1.0 : 0.94,
+                                opacity: isActive ? 1.0 : 0.7,
+                                filter: 'blur(0px)',
+                              }
                         }
-                      } else if (e.deltaX < -35) {
-                        // Swiped trackpad right -> go to previous page
-                        if (activeLogIndex > 0) {
-                          setDragDirection('right');
-                          setActiveLogIndex((prev) => prev - 1);
-                          lastWheelTime.current = now;
+                        transition={
+                          skipNextTransition.current
+                            ? { duration: 0 }
+                            : expandingYear !== null
+                            ? { duration: 0.32, ease: [0.16, 1, 0.3, 1] }
+                            : { type: "spring", duration: 0.26, bounce: 0.2 }
                         }
-                      }
-                    }
-                  }
-                }}
-                className="bg-[#faf6eb] text-stone-800 rounded-2xl p-4 sm:p-5 min-h-[460px] relative overflow-hidden flex flex-col justify-between border border-stone-200 shadow-inner select-none"
-              >
-                {/* Guilloché pattern background */}
-                <div className="absolute inset-0 opacity-[0.03] pointer-events-none select-none bg-[radial-gradient(#1e3a8a_1px,transparent_1px)] [background-size:16px_16px]" />
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-[0.03] select-none">
-                  <Globe className="w-64 h-64 text-blue-900" />
-                </div>
-
-                {/* Header info */}
-                <div className="border-b border-stone-200 pb-2 flex justify-between items-center z-10">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs">🇰🇷</span>
-                    <span className="font-sans font-black text-[10px] text-stone-500 uppercase tracking-widest">
-                      {activeLogIndex === 0 ? '신원정보면 / Identity Page' : `출입국 사증 / VISAS (Page ${activeLogIndex})`}
-                    </span>
-                  </div>
-                  <span className="font-mono text-[9px] font-black text-stone-400">
-                    {activeLogIndex + 1} / {logs.length + 1}
-                  </span>
-                </div>
-
-                {/* Main page slide */}
-                <div className="flex-1 my-3 flex flex-col justify-center relative z-10 min-h-[300px]">
-                  <motion.div
-                    drag="x"
-                    dragConstraints={{ left: 0, right: 0 }}
-                    dragElastic={0.4}
-                    onDragEnd={(e, info) => {
-                      // Moderate sensitivity for drag swipes: requires clear drag offset (80px) or deliberate fast flick
-                      const swipeThreshold = 80;
-                      const isSwipeLeft = info.offset.x < -swipeThreshold || (info.offset.x < -25 && info.velocity.x < -350);
-                      const isSwipeRight = info.offset.x > swipeThreshold || (info.offset.x > 25 && info.velocity.x > 350);
-                      if (isSwipeLeft && activeLogIndex < logs.length) {
-                        setDragDirection('left');
-                        setActiveLogIndex(activeLogIndex + 1);
-                      } else if (isSwipeRight && activeLogIndex > 0) {
-                        setDragDirection('right');
-                        setActiveLogIndex(activeLogIndex - 1);
-                      }
-                    }}
-                    style={{ touchAction: 'pan-y' }}
-                    className="cursor-grab active:cursor-grabbing w-full h-full flex flex-col justify-center"
-                  >
-                    <AnimatePresence mode="wait">
-                      {activeLogIndex === 0 ? (
-                        // IDENTITY PAGE
-                        <motion.div
-                          key="identity-page"
-                          initial={{ opacity: 0, x: -20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          exit={{ opacity: 0, x: 20 }}
-                          transition={{ duration: 0.2 }}
-                          className="space-y-4"
-                        >
-                          <div className="flex gap-4 items-start">
-                            {/* Profile photo */}
-                            <div className="w-24 h-32 bg-stone-100 rounded-lg border-2 border-stone-300 shadow-md overflow-hidden relative shrink-0 flex items-center justify-center">
-                              <div className="absolute inset-0 bg-gradient-to-b from-stone-200 to-stone-400 flex items-end justify-center">
-                                <User className="w-16 h-16 text-stone-100 mb-1" />
-                              </div>
-                              <div className="absolute bottom-2 -right-2 rotate-[-12deg] border border-blue-500/60 bg-white/80 text-blue-600 font-sans font-black text-[8px] py-0.5 px-1.5 rounded uppercase tracking-wider select-none pointer-events-none scale-90">
-                                SEOUL IMMIG
-                              </div>
-                            </div>
-
-                            {/* Identity detail */}
-                            <div className="flex-1 space-y-2 text-[10px] sm:text-xs">
-                              <div>
-                                <span className="block text-[8px] font-black text-stone-400 uppercase leading-none">성 / Surname</span>
-                                <span className="font-sans font-black text-stone-800">TRIPPO</span>
-                              </div>
-                              <div>
-                                <span className="block text-[8px] font-black text-stone-400 uppercase leading-none">이름 / Given Name</span>
-                                <span className="font-sans font-black text-stone-800">TRAVELLER</span>
-                              </div>
-                              <div className="grid grid-cols-2 gap-2">
-                                <div>
-                                  <span className="block text-[8px] font-black text-stone-400 uppercase leading-none">국적 / Nationality</span>
-                                  <span className="font-sans font-bold text-stone-800">KOR</span>
-                                </div>
-                                <div>
-                                  <span className="block text-[8px] font-black text-stone-400 uppercase leading-none">여권번호 / Passport No</span>
-                                  <span className="font-mono font-bold text-stone-800">TR20260711</span>
-                                </div>
-                              </div>
-                              <div className="grid grid-cols-2 gap-2">
-                                <div>
-                                  <span className="block text-[8px] font-black text-stone-400 uppercase leading-none">발행일 / Date of Issue</span>
-                                  <span className="font-sans font-medium text-stone-700">11 JUL 2026</span>
-                                </div>
-                                <div>
-                                  <span className="block text-[8px] font-black text-stone-400 uppercase leading-none">기간만료 / Date of Expiry</span>
-                                  <span className="font-sans font-medium text-stone-700">10 JUL 2036</span>
-                                </div>
-                              </div>
-                              <div>
-                                <span className="block text-[8px] font-black text-stone-400 uppercase leading-none">소지한 스탬프 / Stamps Count</span>
-                                <span className="font-sans font-black text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-md inline-block mt-0.5 shadow-sm">
-                                  {logs.length} Stamps
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Barcode & MRZ */}
-                          <div className="pt-4 border-t border-dashed border-stone-300 space-y-1.5">
-                            <div className="flex flex-col items-center justify-center opacity-70">
-                              <div className="h-6 w-full bg-[repeating-linear-gradient(90deg,#1c1917,#1c1917_2px,transparent_2px,transparent_6px,#1c1917_6px,#1c1917_9px)]" />
-                              <span className="font-mono text-[8px] tracking-widest text-stone-500 pt-0.5">TRIPPO-TRAVEL-ENGINE-2026</span>
-                            </div>
-                            <div className="bg-stone-100/60 p-2 rounded-lg border border-stone-200/50">
-                              <p className="font-mono text-[9px] text-stone-500 uppercase tracking-widest leading-none whitespace-pre-wrap">
-                                {`P<KORTravel<<Trippo<<<<<<<<<<<<<<<<<<<<<<\nTR20260711<3KOR8812301M2607110<<<<<<<<`}
-                              </p>
-                            </div>
-                          </div>
-                        </motion.div>
-                      ) : (
-                        // STAMP / VISA SLIDE
-                        (() => {
-                          const logIndex = activeLogIndex - 1;
-                          const log = logs[logIndex];
-                          if (!log) return null;
-
-                          const stampStyle = logIndex % 3;
-
-                          // Parse JSON if possible for rich memory scrapbook visuals
-                          let scrapbookData: any = null;
-                          let isScrapbook = false;
-                          if (log.content && log.content.startsWith('{')) {
-                            try {
-                              scrapbookData = JSON.parse(log.content);
-                              isScrapbook = true;
-                            } catch (e) {
-                              isScrapbook = false;
+                      >
+                        <div
+                          onClick={() => {
+                            if (isActive) {
+                              if (expandingYear) return;
+                              setZoomDirection('in');
+                              setExpandingYear(year);
+                              setTimeout(() => {
+                                setSelectedYear(year);
+                                setCurrentIndex(0);
+                                setExpandingYear(null);
+                              }, 150);
+                            } else {
+                              setCurrentYearIndex(index);
                             }
-                          }
+                          }}
+                          className="bg-white dark:bg-surface-primary rounded-[32px] p-6 border border-stone-100 dark:border-subtle-border shadow-sm hover:shadow-md transition-all cursor-pointer flex flex-col items-center group relative overflow-hidden h-[360px] justify-between"
+                        >
+                          {/* Polaroid Stack Collage */}
+                          <div className="relative w-full h-[200px] flex items-center justify-center mb-4 mt-2">
+                            {yearLogs.slice(0, 3).reverse().map((log, idx, arr) => {
+                              const reverseIdx = arr.length - 1 - idx; // 0: frontmost, 1: middle, 2: back
+                              const rotation = reverseIdx === 0 ? -2 : reverseIdx === 1 ? 5 : -6;
+                              const xOffset = reverseIdx === 0 ? 0 : reverseIdx === 1 ? 12 : -12;
+                              const yOffset = reverseIdx === 0 ? 0 : reverseIdx === 1 ? -6 : -12;
+                              const zIndex = 10 - reverseIdx;
+                              const scale = reverseIdx === 0 ? 1 : reverseIdx === 1 ? 0.93 : 0.86;
+                              const opacity = reverseIdx === 0 ? 1 : reverseIdx === 1 ? 0.78 : 0.45;
 
-                          return (
-                            <motion.div
-                              key={`stamp-page-${log.id}`}
-                              initial={{ opacity: 0, x: dragDirection === 'left' ? 30 : -30 }}
-                              animate={{ opacity: 1, x: 0 }}
-                              exit={{ opacity: 0, x: dragDirection === 'left' ? -30 : 30 }}
-                              transition={{ duration: 0.25 }}
-                              onTap={() => setSelectedLog(log)}
-                              className="space-y-4 flex flex-col items-center justify-center select-none cursor-pointer"
-                            >
-                              {/* Stamp Render */}
-                              <div className="w-full flex justify-center py-1">
-                                {stampStyle === 0 && (
-                                  <div className="w-24 h-24 border-4 border-double border-teal-600/80 rounded-full flex flex-col items-center justify-center p-1.5 relative text-teal-600/80 font-sans font-bold select-none rotate-3 shadow-sm bg-teal-50/10">
-                                    <span className="text-[7px] tracking-[0.2em] uppercase leading-none mb-1">DEPARTED</span>
-                                    <div className="flex items-center gap-1 border-y border-teal-600/50 py-0.5 px-1.5 text-[11px] font-mono leading-none my-0.5">
-                                      <span>✈️</span>
-                                      <span>{log.date}</span>
-                                    </div>
-                                    <span className="text-[10px] font-black uppercase tracking-wider truncate max-w-[80px] text-center">{log.location || 'KOREA'}</span>
-                                    <span className="text-[6px] tracking-widest text-teal-600/60 uppercase mt-0.5">KOR IMMIG</span>
-                                  </div>
-                                )}
-
-                                {stampStyle === 1 && (
-                                  <div className="w-32 h-20 border-2 border-rose-600/80 rounded-xl flex flex-col items-center justify-center p-2 relative text-rose-600/80 font-sans font-bold select-none -rotate-6 shadow-sm bg-rose-50/10">
-                                    <span className="text-[8px] tracking-[0.15em] uppercase leading-none mb-1">IMMIGRATION / ARRIVED</span>
-                                    <div className="w-full border-t border-dashed border-rose-600/60 my-0.5" />
-                                    <span className="text-[11px] font-mono font-black py-0.5 px-2 bg-rose-100/30 rounded">{log.date}</span>
-                                    <div className="w-full border-b border-dashed border-rose-600/60 my-0.5" />
-                                    <span className="text-[9px] font-black uppercase tracking-wider truncate max-w-[110px]">{log.location || 'TOKYO'}</span>
-                                  </div>
-                                )}
-
-                                {stampStyle === 2 && (
-                                  <div className="w-32 h-22 border-2 border-dashed border-indigo-600/80 rounded-lg flex flex-col items-center justify-center p-1.5 relative text-indigo-600/80 font-sans font-bold select-none rotate-6 shadow-sm bg-indigo-50/10">
-                                    <div className="absolute top-0.5 left-1 text-[6px] tracking-wider text-indigo-500">APPROVED ENTRY</div>
-                                    <span className="text-[10px] font-black uppercase tracking-widest mb-1">{log.location || 'PARIS'}</span>
-                                    <div className="flex items-center gap-1 py-0.5 px-2 bg-indigo-100/30 border border-indigo-600/40 rounded font-mono text-[10px] leading-none mb-1">
-                                      <span>✈️</span>
-                                      <span>{log.date}</span>
-                                    </div>
-                                    <span className="text-[6px] tracking-[0.1em] text-indigo-600/60 uppercase">IMMIGRATION OFFICER</span>
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* Polaroid photo representation with tape and stickers */}
-                              {log.image ? (
-                                <div className="w-48 bg-white p-2.5 pb-4 rounded-md shadow-md border border-stone-200/60 rotate-[-1.5deg] relative group transition-transform hover:rotate-1">
-                                  {/* Scrapbook Washi Tape Deco */}
-                                  <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-16 h-4 bg-amber-200/65 border border-amber-300/30 transform rotate-[-3deg] select-none pointer-events-none" />
+                              return (
+                                <div
+                                  key={log.id}
+                                  style={{
+                                    transform: `rotate(${rotation}deg) translate(${xOffset}px, ${yOffset}px) scale(${scale})`,
+                                    zIndex,
+                                    opacity,
+                                    backgroundImage: log.image ? `url(${log.image})` : 'none'
+                                  }}
+                                  className="absolute w-[170px] h-[170px] rounded-2xl shadow-md border-4 border-white dark:border-zinc-800 bg-gradient-to-tr from-stone-50 to-stone-100 dark:from-zinc-900 dark:to-zinc-800 bg-cover bg-center overflow-hidden flex flex-col justify-end p-2.5 transition-transform duration-300 group-hover:translate-y-[-4px]"
+                                >
+                                  {/* Bottom dark overlay for legibility */}
+                                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/10 to-transparent pointer-events-none" />
                                   
-                                  {/* Cute Mood/Weather Sticker Badges pinned to Polaroid */}
-                                  {isScrapbook && (
-                                    <div className="absolute -bottom-2 -left-2 flex flex-col gap-0.5 z-10 scale-90">
-                                      <span className="bg-white border-2 border-stone-800 text-xs px-1.5 py-0.5 rounded-full font-sans font-bold shadow-md transform rotate-[-8deg] shrink-0 text-stone-800">
-                                        {scrapbookData.mood}
-                                      </span>
-                                      <span className="bg-white border-2 border-stone-800 text-xs px-1.5 py-0.5 rounded-full font-sans font-bold shadow-md transform rotate-[5deg] shrink-0 text-stone-800">
-                                        {scrapbookData.weather}
-                                      </span>
+                                  {/* Inner content preview if there is no image */}
+                                  {!log.image && log.content && (
+                                    <div className="absolute inset-x-2 top-2 bottom-10 overflow-hidden opacity-40 pointer-events-none scale-75 origin-top-left">
+                                      <p className="font-mono text-[9px] text-stone-700 dark:text-stone-300 line-clamp-4 leading-normal">{log.content}</p>
                                     </div>
                                   )}
-
-                                  {/* Stamp Stickers preview overlay on Polaroid top-right */}
-                                  {isScrapbook && scrapbookData?.stickers && scrapbookData.stickers.length > 0 && (
-                                    <div className="absolute -top-2.5 -right-2 flex gap-0.5 z-15">
-                                      {scrapbookData.stickers.slice(0, 3).map((emoji: string, idx: number) => (
-                                        <span 
-                                          key={idx} 
-                                          className="bg-white border-2 border-stone-800 w-6 h-6 flex items-center justify-center rounded-full text-xs shadow-md font-bold select-none"
-                                          style={{ transform: `rotate(${(idx % 2 === 0 ? 10 : -10) * (idx + 1)}deg)` }}
-                                        >
-                                          {emoji}
-                                        </span>
+                                  
+                                  {/* Inner Stamp images */}
+                                  {log.stamps && log.stamps.length > 0 && (
+                                    <div className="absolute top-1.5 right-1.5 flex -space-x-1.5">
+                                      {log.stamps.slice(0, 2).map((st, sIdx) => (
+                                        <img 
+                                          key={sIdx}
+                                          src={typeof st === 'string' ? st : st.imageUrl} 
+                                          alt="stamp" 
+                                          className="w-5 h-5 object-contain drop-shadow"
+                                          referrerPolicy="no-referrer"
+                                        />
                                       ))}
                                     </div>
                                   )}
 
-                                  <div className="w-full h-28 bg-stone-100 rounded overflow-hidden">
-                                    <img
-                                      src={log.image}
-                                      alt={log.title}
-                                      className="w-full h-full object-cover"
-                                      referrerPolicy="no-referrer"
-                                    />
+                                  <div className="relative z-10">
+                                    <span className="text-[10px] font-sans font-bold text-white truncate block">{log.title}</span>
+                                    <span className="text-[8px] font-mono text-white/75 block mt-0.5">{log.date}</span>
                                   </div>
-                                  <p className="font-sans italic font-bold text-[10px] text-stone-600 text-center mt-2.5 truncate">
-                                    "{log.title}"
-                                  </p>
                                 </div>
-                              ) : (
-                                <div className="w-44 bg-white/95 p-3 rounded-xl border border-stone-200/50 flex flex-col items-center justify-center py-6 text-center space-y-1 rotate-1 relative">
-                                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 w-14 h-4 bg-blue-200/50 border border-blue-300/20 transform rotate-[2deg] select-none" />
-                                  <span className="text-xl">✍️</span>
-                                  <h4 className="font-sans font-bold text-xs text-stone-700 truncate max-w-[140px]">{log.title}</h4>
-                                  <p className="font-sans text-[10px] text-stone-500">{log.date}</p>
-                                </div>
-                              )}
+                              );
+                            })}
+                          </div>
 
-                              {/* Preview Content */}
-                              <div className="text-center max-w-[220px]">
-                                <p className="font-sans text-[11px] text-stone-600 leading-relaxed line-clamp-2">
-                                  {isScrapbook ? scrapbookData.story : log.content}
-                                </p>
-                                {isScrapbook && scrapbookData.visitedSpots && scrapbookData.visitedSpots.length > 0 && (
-                                  <div className="mt-1 flex flex-wrap gap-1 justify-center max-w-[210px] mx-auto opacity-90 scale-90">
-                                    <span className="bg-[#4a7865]/10 text-[#4a7865] border border-[#4a7865]/20 font-sans font-black text-[8px] px-2 py-0.5 rounded-full">
-                                      📍 {language === 'ko' 
-                                        ? `${scrapbookData.visitedSpots.length}곳의 소중한 기록` 
-                                        : `${scrapbookData.visitedSpots.length} recorded place(s)`}
-                                    </span>
-                                  </div>
-                                )}
-                                <span className="inline-flex items-center gap-1 font-sans text-[9px] font-black text-[#4a7865] bg-[#4a7865]/10 px-2 py-0.5 rounded-md mt-2 select-none">
-                                  {language === 'ko' ? '🔍 터치하여 추억 펼치기' : '🔍 Tap to open memory'}
-                                </span>
-                              </div>
-                            </motion.div>
-                          );
-                        })()
-                      )}
-                    </AnimatePresence>
-                  </motion.div>
+                          {/* Year Information */}
+                          <div className="text-center space-y-1 pb-2">
+                            <span className="font-logo font-black text-3xl tracking-tight text-stone-900 dark:text-text-primary">
+                              {year}
+                            </span>
+                            <p className="font-sans text-xs font-bold text-blue-500 dark:text-brand-primary">
+                              {language === 'ko' ? `${yearLogs.length}개의 기록` : `${yearLogs.length} Records`}
+                            </p>
+                            {locations.length > 0 && (
+                              <p className="font-sans text-[11px] text-stone-400 dark:text-stone-500 max-w-[200px] truncate mx-auto">
+                                {locations.join(' • ')}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                  {sortedYears.length > 0 && (
+                    <div 
+                      style={{ width: `${Math.max(0, (viewportWidth - cardWidth) / 2 - 16)}px` }} 
+                      className="flex-shrink-0 h-1" 
+                    />
+                  )}
                 </div>
-
-                {/* Bottom Swipe Controls */}
-                <div className="border-t border-stone-200/80 pt-3 flex justify-between items-center z-10">
+              </motion.div>
+            ) : (
+              <motion.div
+                key="year-detail"
+                initial={{ opacity: 0, scale: zoomDirection === 'in' ? 0.88 : 1.15, filter: 'blur(2px)' }}
+                animate={collapsingYear 
+                  ? { opacity: 0, scale: 0.78, filter: 'blur(4px)' } 
+                  : { opacity: 1, scale: 1, filter: 'blur(0px)' }
+                }
+                exit={{ opacity: 0, scale: zoomDirection === 'out' ? 0.88 : 1.15, filter: 'blur(4px)' }}
+                transition={{ 
+                  duration: collapsingYear ? 0.18 : 0.38, 
+                  ease: [0.16, 1, 0.3, 1] 
+                }}
+                className="w-full h-full flex-1 flex flex-col min-h-0 origin-center"
+              >
+                {/* Year Detail Header Menu with Zoom back button */}
+                <div className="flex items-center justify-between mb-4 px-1 shrink-0">
                   <button
                     onClick={() => {
-                      setDragDirection('right');
-                      if (activeLogIndex > 0) setActiveLogIndex(activeLogIndex - 1);
+                      if (collapsingYear) return;
+                      setZoomDirection('out');
+                      setCollapsingYear(true);
+                      setTimeout(() => {
+                        setSelectedYear(null);
+                        setCurrentIndex(0);
+                        setCollapsingYear(false);
+                      }, 180);
                     }}
-                    disabled={activeLogIndex === 0}
-                    className="p-1.5 hover:bg-stone-200/50 rounded-lg text-stone-500 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+                    className="flex items-center gap-1.5 text-xs font-bold text-stone-500 dark:text-stone-400 bg-stone-100 dark:bg-zinc-800/70 py-1.5 px-3.5 rounded-full hover:bg-stone-200 dark:hover:bg-zinc-700 transition-all active:scale-95 shadow-sm"
                   >
-                    <ChevronLeft size={18} />
-                  </button>
-
-                  <div className="flex gap-1.5 items-center justify-center max-w-[140px] overflow-hidden">
-                    {Array.from({ length: logs.length + 1 }).map((_, i) => (
-                      <button
-                        key={i}
-                        onClick={() => {
-                          setDragDirection(i > activeLogIndex ? 'left' : 'right');
-                          setActiveLogIndex(i);
-                        }}
-                        className={`w-1.5 h-1.5 rounded-full transition-all duration-300 ${
-                          i === activeLogIndex ? 'bg-blue-600 scale-125 w-3' : 'bg-stone-300'
-                        }`}
-                      />
-                    ))}
-                  </div>
-
-                  <button
-                    onClick={() => {
-                      setDragDirection('left');
-                      if (activeLogIndex < logs.length) setActiveLogIndex(activeLogIndex + 1);
-                    }}
-                    disabled={activeLogIndex === logs.length}
-                    className="p-1.5 hover:bg-stone-200/50 rounded-lg text-stone-500 disabled:opacity-30 disabled:pointer-events-none transition-colors"
-                  >
-                    <ChevronRight size={18} />
+                    <ChevronLeft size={14} />
+                    <span>{language === 'ko' ? `${selectedYear}년 전체 보기` : `All in ${selectedYear}`}</span>
                   </button>
                 </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </section>
 
-      {/* Travel Record Write Modal Overlay */}
-      <AnimatePresence>
-        {isWriteModalOpen && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-4">
-            <div className="absolute inset-0" onClick={() => { setIsWriteModalOpen(false); setEditingLog(null); }} />
-            
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
-              className="bg-white dark:bg-[#1a1924] w-full max-w-md rounded-[32px] overflow-hidden shadow-2xl relative z-10 border border-gray-100 dark:border-[#262435] flex flex-col max-h-[90vh] text-stone-800 dark:text-stone-100"
-            >
-              {/* Header */}
-              <div className="px-6 py-4 border-b border-gray-100 dark:border-[#262435] flex items-center justify-between bg-white dark:bg-[#15141f] sticky top-0 z-20">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm">✍️</span>
-                  <h3 className="font-sans font-bold text-base text-gray-800 dark:text-zinc-100">
-                    {editingLog 
-                      ? (language === 'ko' ? '여행 기록 수정하기' : 'Edit Travel Record') 
-                      : (language === 'ko' ? '새로운 여행 기록 남기기' : 'Write Travel Record')}
-                  </h3>
-                </div>
-                <button
-                  onClick={() => { setIsWriteModalOpen(false); setEditingLog(null); }}
-                  className="p-1.5 hover:bg-gray-50 dark:hover:bg-stone-800 rounded-lg text-gray-400 dark:text-stone-500 hover:text-gray-700 dark:hover:text-stone-300 transition-colors"
+                {/* Swipable Carousel for Selected Year */}
+                <div 
+                  ref={logsScrollRef}
+                  onScroll={handleLogsScroll}
+                  onMouseDown={handleMouseDown}
+                  onMouseMove={handleMouseMove}
+                  onMouseUp={(e) => handleMouseUpOrLeave(e, 'logs')}
+                  onMouseLeave={(e) => handleMouseUpOrLeave(e, 'logs')}
+                  className="flex-1 min-h-0 w-full overflow-x-auto snap-x snap-mandatory scrollbar-none py-2 flex items-center cursor-grab active:cursor-grabbing gap-4"
+                  style={{
+                    paddingLeft: `${(viewportWidth - cardWidth) / 2}px`,
+                    paddingRight: '0px',
+                    scrollPaddingLeft: `${(viewportWidth - cardWidth) / 2}px`,
+                    scrollPaddingRight: `${(viewportWidth - cardWidth) / 2}px`
+                  }}
                 >
-                  <X size={18} />
+                  {currentYearLogs.filter(l => l && l.id).map((log, index) => {
+                    const isActive = index === currentIndex;
+                    return (
+                      <motion.div
+                        key={log.id}
+                        style={{ width: cardWidth }}
+                        className="flex-shrink-0 origin-center flex flex-col justify-center snap-center"
+                        animate={{
+                          scale: isActive ? 1.0 : 0.94,
+                          opacity: isActive ? 1.0 : 0.7,
+                        }}
+                        transition={{ type: "spring", duration: 0.26, bounce: 0.2 }}
+                      >
+                        <RecordCard 
+                          log={log} 
+                          onEdit={handleStartEdit} 
+                          onDelete={onDeleteLog} 
+                          onClick={() => {
+                            if (isActive) {
+                              setViewingLog(log);
+                            } else {
+                              setCurrentIndex(index);
+                            }
+                          }} 
+                          isDarkMode={isDarkMode} 
+                        />
+                      </motion.div>
+                    );
+                  })}
+                  {currentYearLogs.filter(l => l && l.id).length > 0 && (
+                    <div 
+                      style={{ width: `${Math.max(0, (viewportWidth - cardWidth) / 2 - 16)}px` }} 
+                      className="flex-shrink-0 h-1" 
+                    />
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Unified Bottom Page Indicator */}
+          <div className="absolute bottom-[-24px] left-1/2 -translate-x-1/2 h-[12px] flex justify-center items-center z-30">
+            <div className="flex items-center gap-2">
+              {selectedYear === null 
+                ? sortedYears.map((_, index) => {
+                    const isActive = index === currentYearIndex;
+                    return (
+                      <motion.button
+                        key={`year-dot-${index}`}
+                        onClick={() => setCurrentYearIndex(index)}
+                        initial={false}
+                        animate={{
+                          width: isActive ? 24 : 6,
+                          height: 6,
+                        }}
+                        transition={{ duration: 0.2, ease: "easeOut" }}
+                        className={`rounded-full ${
+                          isActive
+                            ? 'bg-blue-600'
+                            : 'bg-stone-400/45'
+                        }`}
+                        aria-label={`Go to year slide ${index + 1}`}
+                      />
+                    );
+                  })
+                : currentYearLogs.filter(l => l && l.id).map((_, index) => {
+                    const isActive = index === currentIndex;
+                    return (
+                      <motion.button
+                        key={`log-dot-${index}`}
+                        onClick={() => setCurrentIndex(index)}
+                        initial={false}
+                        animate={{
+                          width: isActive ? 24 : 6,
+                          height: 6,
+                        }}
+                        transition={{ duration: 0.2, ease: "easeOut" }}
+                        className={`rounded-full ${
+                          isActive
+                            ? 'bg-blue-600'
+                            : 'bg-stone-400/45'
+                        }`}
+                        aria-label={`Go to slide ${index + 1}`}
+                      />
+                    );
+                  })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Choice Modal (새 기록 작성 / 계획 불러오기 선택) */}
+      <AnimatePresence>
+        {isChoiceModalOpen && (
+          <>
+            {/* Backdrop Overlay */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsChoiceModalOpen(false)}
+              className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm md:max-w-md md:mx-auto"
+            />
+
+            {/* Choice Container (Bottom Sheet styled) */}
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="fixed bottom-0 left-0 right-0 z-50 bg-white dark:bg-app-bg rounded-t-[28px] p-6 pb-8 shadow-2xl md:max-w-md md:mx-auto border-t border-gray-100 dark:border-subtle-border space-y-5"
+            >
+              {/* Drag Indicator Handle */}
+              <div className="w-full flex justify-center pb-2">
+                <div className="w-12 h-1 bg-gray-300 dark:bg-zinc-700 rounded-full" />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <h3 className="font-sans font-bold text-lg text-gray-800 dark:text-text-primary">
+                  {language === 'ko' ? '새 기록 작성 방식 선택' : 'Choose Record Creation Method'}
+                </h3>
+                <button
+                  onClick={() => setIsChoiceModalOpen(false)}
+                  className="bg-gray-100 dark:bg-surface-secondary text-gray-500 dark:text-text-secondary p-1.5 rounded-full hover:bg-gray-200 dark:hover:bg-zinc-700 active:scale-95 transition-all"
+                >
+                  <X size={16} />
                 </button>
               </div>
 
-              {/* Scrollable Form Body */}
-              <div className="p-6 overflow-y-auto flex-1 space-y-5 bg-stone-50/30 dark:bg-[#13121a]/30">
-                {/* 1. Memory Photo Section */}
-                <div className="space-y-2.5 text-left">
-                  <label className="text-[10px] font-black text-stone-400 uppercase tracking-widest ml-1">{t('photo_title')}</label>
-                  {draftImage ? (
-                    <div className="relative w-full h-44 rounded-2xl overflow-hidden bg-stone-100 border border-stone-200 shadow-sm group">
-                      <img src={draftImage} alt="Draft" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+              <div className="grid grid-cols-1 gap-4">
+                {/* Option 1: Create New Record */}
+                <button
+                  onClick={() => {
+                    setIsChoiceModalOpen(false);
+                    setIsWriteModalOpen(true);
+                  }}
+                  className="flex items-start gap-4 p-4 rounded-2xl border border-gray-100 dark:border-subtle-border hover:border-blue-500 dark:hover:border-blue-500 bg-gray-50/50 dark:bg-surface-primary hover:bg-blue-50/10 dark:hover:bg-blue-950/10 transition-all text-left group"
+                >
+                  <div className="p-3 rounded-xl bg-blue-500/10 text-blue-500 group-hover:bg-blue-500 group-hover:text-white transition-all flex-shrink-0">
+                    <PenTool size={20} />
+                  </div>
+                  <div>
+                    <h4 className="font-sans font-bold text-sm text-gray-800 dark:text-text-primary">
+                      {language === 'ko' ? '새 기록 직접 작성' : 'Write New Record'}
+                    </h4>
+                    <p className="font-sans text-xs text-gray-400 mt-1 leading-relaxed">
+                      {language === 'ko' 
+                        ? '일정과 세부 사항을 처음부터 직접 자유롭게 작성합니다.' 
+                        : 'Write down your travel stories freely from a blank page.'}
+                    </p>
+                  </div>
+                </button>
+
+                {/* Option 2: Load Plan */}
+                <button
+                  onClick={() => {
+                    setIsChoiceModalOpen(false);
+                    setIsPlanListModalOpen(true);
+                  }}
+                  className="flex items-start gap-4 p-4 rounded-2xl border border-gray-100 dark:border-subtle-border hover:border-emerald-500 dark:hover:border-emerald-500 bg-gray-50/50 dark:bg-surface-primary hover:bg-emerald-50/10 dark:hover:bg-emerald-950/10 transition-all text-left group"
+                >
+                  <div className="p-3 rounded-xl bg-emerald-500/10 text-emerald-500 group-hover:bg-emerald-500 group-hover:text-white transition-all flex-shrink-0">
+                    <CalendarDays size={20} />
+                  </div>
+                  <div>
+                    <h4 className="font-sans font-bold text-sm text-gray-800 dark:text-text-primary">
+                      {language === 'ko' ? '여행 계획 불러오기' : 'Load Travel Plan'}
+                    </h4>
+                    <p className="font-sans text-xs text-gray-400 mt-1 leading-relaxed">
+                      {language === 'ko' 
+                        ? '계획 탭에서 작성된 나의 일정과 코스를 가져와 기록으로 남깁니다.' 
+                        : 'Import coordinates and plans from your Travel Plan tab.'}
+                    </p>
+                  </div>
+                </button>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Plan List Modal (작성된 계획 리스트 불러오기) */}
+      <AnimatePresence>
+        {isPlanListModalOpen && (
+          <>
+            {/* Backdrop Overlay */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsPlanListModalOpen(false)}
+              className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm md:max-w-md md:mx-auto"
+            />
+
+            {/* List Container (Bottom Sheet styled) */}
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="fixed bottom-0 left-0 right-0 z-50 bg-gray-50 dark:bg-app-bg rounded-t-[28px] h-[75vh] max-h-[75vh] overflow-hidden flex flex-col shadow-2xl md:max-w-md md:mx-auto border-t border-gray-100 dark:border-subtle-border"
+            >
+              {/* Drag Indicator Handle */}
+              <div className="w-full flex justify-center py-3 flex-shrink-0">
+                <div className="w-12 h-1 bg-gray-300 dark:bg-zinc-700 rounded-full" />
+              </div>
+
+              {/* Header with back button */}
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-subtle-border bg-white dark:bg-surface-primary sticky top-0 z-10 flex-shrink-0">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setIsPlanListModalOpen(false);
+                      setIsChoiceModalOpen(true);
+                    }}
+                    className="p-1.5 rounded-full text-gray-500 hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors"
+                  >
+                    <ChevronLeft size={18} />
+                  </button>
+                  <h3 className="font-sans font-bold text-base text-gray-800 dark:text-text-primary">
+                    {language === 'ko' ? '불러올 계획 선택' : 'Select Travel Plan'}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setIsPlanListModalOpen(false)}
+                  className="bg-gray-100 dark:bg-surface-secondary text-gray-500 dark:text-text-secondary p-1.5 rounded-full hover:bg-gray-200 dark:hover:bg-zinc-700 active:scale-95 transition-all"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              {/* Scrollable list of plans */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
+                {(() => {
+                  const history = getPlansHistory();
+                  if (history.length === 0) {
+                    return (
+                      <div className="flex flex-col items-center justify-center py-16 text-center space-y-3">
+                        <CalendarDays className="text-gray-300 dark:text-zinc-700" size={48} />
+                        <p className="font-sans text-xs font-semibold text-gray-400 leading-relaxed">
+                          {language === 'ko' 
+                            ? '아직 작성된 여행 계획이 없습니다.\n계획 탭에서 나만의 멋진 여행 계획을 세워보세요!' 
+                            : 'No travel plans found.\nTry scheduling some activities in the Plan tab!'}
+                        </p>
+                      </div>
+                    );
+                  }
+                  
+                  return history.map((p) => {
+                    const totalActivities = p.days.reduce((acc, d) => acc + (d.items?.length || 0), 0);
+                    return (
                       <button
-                        onClick={() => setDraftImage('')}
-                        className="absolute top-2.5 right-2.5 bg-black/60 text-white p-2 rounded-full hover:bg-black/80 transition-all active:scale-90 shadow"
+                        key={p.id}
+                        onClick={() => {
+                          setDraftTitle(p.title);
+                          setDraftDate(sanitizeDate(p.startDate));
+                          setDraftLocation(cleanLocation(p.title));
+                          setDraftContent(generatePlanSummary(p, language));
+                          
+                          setIsPlanListModalOpen(false);
+                          setIsWriteModalOpen(true);
+                        }}
+                        className="w-full flex flex-col p-4 rounded-2xl border border-gray-100 dark:border-subtle-border bg-white dark:bg-surface-primary hover:border-blue-500 dark:hover:border-blue-500 hover:shadow-md hover:scale-[1.01] active:scale-[0.99] text-left transition-all space-y-3 group"
                       >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="space-y-2.5">
-                      <div className="w-full h-32 border-2 border-dashed border-stone-300 rounded-2xl bg-white flex flex-col items-center justify-center text-stone-400 p-4 gap-2.5 shadow-inner">
-                        <div className="flex flex-col items-center">
-                          <ImageIcon size={24} className="mb-1 text-[#4a7865]" />
-                          <span className="font-sans text-[11px] font-extrabold text-stone-700">
-                            {language === 'ko' ? '추억하고 싶은 순간의 사진' : 'A photo of the moment you want to remember'}
-                          </span>
-                          <span className="font-sans text-[9px] text-stone-400">
-                            {language === 'ko' ? '사진첩에서 올리거나 샘플 사진을 선택해보세요' : 'Upload from your album or choose a sample photo'}
+                        <div className="flex items-start justify-between w-full">
+                          <div className="space-y-1">
+                            <h4 className="font-sans font-bold text-sm text-gray-800 dark:text-text-primary group-hover:text-blue-500 transition-colors">
+                              {p.title}
+                            </h4>
+                            <p className="font-sans text-xs text-gray-400 flex items-center gap-1.5">
+                              <CalendarDays size={12} className="text-gray-400" />
+                              <span>{p.startDate} ~ {p.endDate}</span>
+                            </p>
+                          </div>
+                          <span className="text-[10px] font-sans font-bold bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 px-2 py-0.5 rounded-full">
+                            {p.durationText}
                           </span>
                         </div>
                         
-                        {/* Native Album Photo Upload */}
-                        <label className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-[#4a7865] rounded-xl border border-emerald-200 text-[10px] font-black cursor-pointer transition-all shadow-xs active:scale-95">
-                          <Upload size={12} />
-                          {t('photo_upload_btn')}
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={handleImageUpload}
-                            className="hidden"
-                          />
-                        </label>
-                      </div>
-                      
-                      {/* Image URL Input */}
-                      <input
-                        type="text"
-                        placeholder={t('photo_placeholder')}
-                        value={draftImage}
-                        onChange={(e) => setDraftImage(e.target.value)}
-                        className="w-full bg-white rounded-xl border border-stone-200 px-3 py-2 text-[11px] font-sans text-stone-700 outline-none focus:ring-1 focus:ring-stone-400"
-                      />
+                        <div className="border-t border-gray-50 dark:border-subtle-border/40 pt-2 flex items-center justify-between text-[11px] text-gray-400 font-sans">
+                          <span className="flex items-center gap-1">
+                            <MapPin size={11} />
+                            <span>{cleanLocation(p.title)}</span>
+                          </span>
+                          <span>
+                            {language === 'ko' ? `총 ${totalActivities}개 일정` : `${totalActivities} activities`}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  });
+                })()}
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
-                      {/* Quick Sample Image Selection */}
-                      <div className="grid grid-cols-3 gap-2">
-                        {sampleImages.map((img) => (
-                          <button
-                            key={img.url}
-                            onClick={() => {
-                              setDraftImage(img.url);
-                              if (img.name === '보라카이 바다' || img.name === 'Boracay Ocean') {
-                                setDraftTag(language === 'ko' ? '자연휴양' : 'Nature');
-                              } else if (img.name === '파리 에펠탑' || img.name === 'Eiffel Tower, Paris') {
-                                setDraftLocation('Paris');
-                                setDraftTag(language === 'ko' ? '로맨틱' : 'Romantic');
-                              } else {
-                                setDraftLocation('Tokyo');
-                                setDraftTag(language === 'ko' ? '도심탐방' : 'City');
-                              }
-                            }}
-                            className="rounded-xl overflow-hidden h-10 relative border border-stone-200/60 hover:opacity-90 active:scale-95 transition-all shadow-xs"
-                          >
-                            <img src={img.url} alt={img.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                            <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                              <span className="text-[9px] text-white font-extrabold whitespace-nowrap">{img.name}</span>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+      {/* Write Modal */}
+      <AnimatePresence>
+        {isWriteModalOpen && (
+          <>
+            {/* Backdrop Overlay */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsWriteModalOpen(false)}
+              className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm md:max-w-md md:mx-auto"
+            />
+
+            {/* Bottom Sheet Container */}
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="fixed bottom-0 left-0 right-0 z-50 bg-gray-50 dark:bg-app-bg rounded-t-[28px] h-[86vh] max-h-[86vh] overflow-hidden flex flex-col shadow-2xl md:max-w-md md:mx-auto border-t border-gray-100 dark:border-subtle-border"
+            >
+              {/* Drag Indicator Handle */}
+              <div className="w-full flex justify-center py-3">
+                <div className="w-12 h-1 bg-gray-300 dark:bg-zinc-700 rounded-full" />
+              </div>
+
+              {/* Sheet Sticky Header */}
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-subtle-border bg-white dark:bg-surface-primary sticky top-0 z-10">
+                <div className="flex items-center gap-2">
+                  <h2 className="font-sans font-bold text-lg text-gray-800 dark:text-text-primary">
+                    {editingLog ? (language === 'ko' ? '기록 수정' : 'Edit Record') : (language === 'ko' ? '새 기록 작성' : 'New Record')}
+                  </h2>
                 </div>
-
-                {/* 2. Custom Stickers (Mood & Weather & Stamp Presets) */}
-                <div className="grid grid-cols-1 gap-4.5 text-left">
-                  {/* Mood Selector */}
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('mood_label')}</label>
-                    <div className="flex flex-wrap gap-1.5">
-                      {(language === 'ko'
-                        ? ['🥰 설렘', '🤩 신남', '😴 피곤', '😋 먹부림', '☕ 여유', '🌧️ 운치', '💖 완벽']
-                        : ['🥰 Excited', '🤩 Thrilled', '😴 Tired', '😋 Foodie', '☕ Relaxed', '🌧️ Moody', '💖 Perfect']
-                      ).map((mood) => (
-                        <button
-                          key={mood}
-                          type="button"
-                          onClick={() => setDraftMood(mood)}
-                          className={`px-3 py-1.5 rounded-full font-sans text-xs font-bold border transition-all active:scale-95 ${
-                            draftMood === mood
-                              ? 'bg-amber-100 dark:bg-amber-950/50 border-amber-400 text-stone-800 dark:text-amber-200 shadow-sm scale-105'
-                              : 'bg-white dark:bg-[#15141f] border-stone-200 dark:border-[#2b2a3c] text-stone-500 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-stone-900'
-                          }`}
-                        >
-                          {mood}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Weather Selector */}
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('weather_label')}</label>
-                    <div className="flex flex-wrap gap-1.5">
-                      {(language === 'ko'
-                        ? ['☀️ 맑음', '☁️ 흐림', '🌧️ 비', '❄️ 눈', '💨 바람']
-                        : ['☀️ Sunny', '☁️ Cloudy', '🌧️ Rainy', '❄️ Snowy', '💨 Windy']
-                      ).map((weather) => (
-                        <button
-                          key={weather}
-                          type="button"
-                          onClick={() => setDraftWeather(weather)}
-                          className={`px-3 py-1.5 rounded-full font-sans text-xs font-bold border transition-all active:scale-95 ${
-                            draftWeather === weather
-                              ? 'bg-blue-100 dark:bg-blue-950/50 border-blue-400 text-stone-800 dark:text-blue-200 shadow-sm scale-105'
-                              : 'bg-white dark:bg-[#15141f] border-stone-200 dark:border-[#2b2a3c] text-stone-500 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-stone-900'
-                          }`}
-                        >
-                          {weather}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Pre-saved Stamp Stickers */}
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-[#4a7865] uppercase tracking-widest ml-1 flex items-center gap-1">
-                      <span>{t('stamp_stickers_label')}</span>
-                      <span className="bg-[#4a7865]/10 text-[#4a7865] text-[8px] px-1 rounded-sm">Hot!</span>
-                    </label>
-                    <p className="text-[9px] text-stone-400 leading-none mb-1.5">{t('stamp_stickers_desc')}</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {PRESET_STICKERS.map((sticker) => {
-                        const isSelected = draftStickers.includes(sticker.emoji);
-                        return (
-                          <button
-                            key={sticker.id}
-                            type="button"
-                            onClick={() => {
-                              if (isSelected) {
-                                setDraftStickers(draftStickers.filter((s) => s !== sticker.emoji));
-                              } else {
-                                setDraftStickers([...draftStickers, sticker.emoji]);
-                              }
-                            }}
-                            className={`px-2.5 py-1.5 rounded-xl border font-sans text-[11px] font-black transition-all active:scale-95 flex items-center gap-1 shadow-xs ${
-                              isSelected
-                                ? 'bg-[#4a7865] text-white border-[#4a7865] scale-105 shadow-sm'
-                                : 'bg-white border-stone-200/80 text-stone-600 hover:bg-stone-50'
-                            }`}
-                          >
-                            <span>{sticker.emoji}</span>
-                            <span className="text-[9px] font-sans font-bold tracking-tight text-inherit">{sticker.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setIsWriteModalOpen(false)}
+                    className="bg-gray-100 dark:bg-surface-secondary text-gray-500 dark:text-text-secondary p-2 rounded-full hover:bg-gray-200 dark:hover:bg-zinc-700 active:scale-95 transition-all"
+                  >
+                    <X size={16} />
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    className="bg-blue-600 text-white font-sans font-bold text-xs px-4 py-2 rounded-full shadow-sm hover:bg-blue-700 active:scale-95 transition-all"
+                  >
+                    {language === 'ko' ? '저장' : 'Save'}
+                  </button>
                 </div>
+              </div>
 
-                {/* 3. Visited Places checklist from Plan */}
-                {availableSpots.length > 0 && (
-                  <div className="bg-[#fcfbf7] border border-stone-200/70 rounded-2xl p-4 text-left space-y-2 shadow-xs">
-                    <span className="text-[10px] font-black text-stone-500 uppercase tracking-widest block">{t('visited_spots_label')}</span>
-                    <p className="text-[9px] text-stone-400 leading-none">{t('visited_spots_desc')}</p>
-                    <div className="flex flex-wrap gap-1.5 pt-1">
-                      {availableSpots.map((spot, i) => {
-                        const isChecked = draftVisitedSpots.includes(spot);
-                        return (
-                          <button
-                            key={`${spot}-${i}`}
-                            type="button"
-                            onClick={() => {
-                              if (isChecked) {
-                                setDraftVisitedSpots(draftVisitedSpots.filter((s) => s !== spot));
-                              } else {
-                                setDraftVisitedSpots([...draftVisitedSpots, spot]);
-                              }
-                            }}
-                            className={`px-2.5 py-1.5 rounded-xl font-sans text-[11px] font-semibold border transition-all active:scale-95 flex items-center gap-1 ${
-                              isChecked
-                                ? 'bg-emerald-50 border-emerald-400 text-emerald-800'
-                                : 'bg-white border-stone-200 text-stone-400 hover:bg-stone-50'
-                            }`}
-                          >
-                            <span>{isChecked ? '✅' : '📌'}</span>
-                            <span>{spot}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* 4. Core Details Inputs (Location, Date, Tag) */}
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3 text-left">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('visit_city')}</label>
-                      <input
-                        type="text"
-                        value={draftLocation}
-                        onChange={(e) => setDraftLocation(e.target.value)}
-                        className="w-full bg-white dark:bg-[#15141f] rounded-xl border border-stone-200 dark:border-[#2b2a3c] px-3.5 py-2.5 text-xs font-sans text-gray-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-stone-400 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-600"
-                        placeholder={t('visit_city_placeholder')}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('visit_date')}</label>
-                      <input
-                        type="text"
-                        value={draftDate}
-                        onChange={(e) => setDraftDate(e.target.value)}
-                        className="w-full bg-white dark:bg-[#15141f] rounded-xl border border-stone-200 dark:border-[#2b2a3c] px-3.5 py-2.5 text-xs font-sans text-gray-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-stone-400 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-600"
-                        placeholder={t('visit_date_placeholder')}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1 text-left">
-                    <label className="text-[10px] font-black text-stone-400 dark:text-stone-500 uppercase tracking-widest ml-1">{t('log_tag')}</label>
-                    <input
-                      type="text"
-                      value={draftTag}
-                      onChange={(e) => setDraftTag(e.target.value)}
-                      className="w-full bg-white dark:bg-[#15141f] rounded-xl border border-stone-200 dark:border-[#2b2a3c] px-3.5 py-2.5 text-xs font-sans text-gray-700 dark:text-stone-200 outline-none focus:ring-1 focus:ring-stone-400 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-600"
-                      placeholder={t('log_tag_placeholder')}
-                    />
-                  </div>
-
-                  {/* 5. Scrapbook Cute mini prompts */}
-                  <div className="grid grid-cols-1 gap-3 text-left pt-1">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-black text-orange-500 dark:text-orange-400 uppercase tracking-widest ml-1">{t('best_bite')}</label>
-                      <input
-                        type="text"
-                        value={draftBestBite}
-                        onChange={(e) => setDraftBestBite(e.target.value)}
-                        className="w-full bg-orange-50/20 dark:bg-orange-950/20 rounded-xl border border-orange-200/40 dark:border-orange-900/30 px-3.5 py-2.5 text-xs font-sans text-stone-800 dark:text-stone-200 outline-none focus:ring-1 focus:ring-orange-300 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-650"
-                        placeholder={t('best_bite_placeholder')}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-black text-purple-500 dark:text-purple-400 uppercase tracking-widest ml-1">{t('anecdote')}</label>
-                      <textarea
-                        value={draftAnecdote}
-                        onChange={(e) => setDraftAnecdote(e.target.value)}
-                        className="w-full bg-purple-50/20 dark:bg-purple-950/20 rounded-xl border border-purple-200/40 dark:border-purple-900/30 px-3.5 py-2.5 text-xs font-sans text-stone-850 dark:text-stone-200 outline-none focus:ring-1 focus:ring-purple-300 transition-all shadow-xs placeholder:text-stone-400 dark:placeholder:text-stone-650 h-16 resize-none"
-                        placeholder={t('anecdote_placeholder')}
-                      />
-                    </div>
-                  </div>
-
-                  {/* 6. Title and Story Content */}
-                  <div className="bg-[#4a7865]/5 dark:bg-[#4a7865]/10 rounded-2xl p-4 border border-[#4a7865]/20 space-y-2 text-left">
-                    <label className="text-[10px] font-black text-[#4a7865] dark:text-[#5fa286] uppercase tracking-widest">{t('log_title_label')}</label>
+              {/* Sheet Scrollable Forms */}
+              <div className="p-6 space-y-5 overflow-y-auto pb-12 flex-1 bg-gray-50 dark:bg-app-bg custom-scrollbar">
+                {/* Form fields layout card */}
+                <div className="bg-white dark:bg-surface-primary rounded-2xl p-4 border border-gray-100 dark:border-subtle-border space-y-4">
+                  <div className="space-y-1">
+                    <label className="font-sans font-semibold text-xs text-gray-400 pl-1">{language === 'ko' ? '제목' : 'Title'}</label>
                     <input
                       type="text"
                       value={draftTitle}
                       onChange={(e) => setDraftTitle(e.target.value)}
-                      className="w-full bg-transparent border-none p-0 text-stone-800 dark:text-stone-100 font-sans font-black text-base focus:ring-0 placeholder:text-stone-400 dark:placeholder:text-stone-600 outline-none"
-                      placeholder={t('log_title_placeholder')}
+                      placeholder={language === 'ko' ? '기억에 남는 멋진 순간' : 'A memorable moment'}
+                      className="w-full bg-gray-50/50 dark:bg-app-bg rounded-xl border border-gray-100 dark:border-subtle-border px-3.5 py-3 text-sm font-sans text-gray-800 dark:text-text-primary focus:border-blue-500 focus:bg-white dark:focus:bg-[#1a1924] outline-none transition-colors"
                     />
-                    <div className="border-t border-[#4a7865]/10 my-2" />
-                    <label className="text-[10px] font-black text-[#4a7865] dark:text-[#5fa286] uppercase tracking-widest">{t('log_content_label')}</label>
-                    <textarea
-                      value={draftContent}
-                      onChange={(e) => setDraftContent(e.target.value)}
-                      className="w-full bg-transparent border-none p-0 text-stone-600 dark:text-stone-300 font-sans text-xs sm:text-sm focus:ring-0 placeholder:text-stone-400 dark:placeholder:text-stone-600 resize-none h-28 outline-none leading-relaxed"
-                      placeholder={t('log_content_placeholder')}
-                    ></textarea>
                   </div>
-                </div>
-              </div>
 
-              {/* Action Footer */}
-              <div className="p-4 border-t border-stone-100 dark:border-[#262435] bg-stone-55 dark:bg-[#15141f] flex items-center justify-between sticky bottom-0 z-15">
-                <button
-                  onClick={() => { setIsWriteModalOpen(false); setEditingLog(null); }}
-                  className="bg-white dark:bg-[#1a1924] hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-500 dark:text-stone-400 border border-stone-200 dark:border-[#2b2a3c] px-5 py-2.5 rounded-xl font-sans text-xs font-black transition-all active:scale-95"
-                >
-                  {t('cancel')}
-                </button>
-                <button
-                  onClick={handleSave}
-                  className="bg-[#4a7865] hover:bg-[#3d6353] text-white px-6 py-2.5 rounded-xl font-sans text-xs font-black transition-all active:scale-95 shadow-md flex items-center gap-1"
-                >
-                  {t('save_log_btn')}
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="font-sans font-semibold text-xs text-gray-400 pl-1">{language === 'ko' ? '위치' : 'Location'}</label>
+                      <input
+                        type="text"
+                        value={draftLocation}
+                        onChange={(e) => setDraftLocation(e.target.value)}
+                        placeholder="예: 파리 에펠탑"
+                        className="w-full bg-gray-50/50 dark:bg-app-bg rounded-xl border border-gray-100 dark:border-subtle-border px-3.5 py-3 text-sm font-sans text-gray-800 dark:text-text-primary focus:border-blue-500 focus:bg-white dark:focus:bg-[#1a1924] outline-none transition-colors"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="font-sans font-semibold text-xs text-gray-400 pl-1">{language === 'ko' ? '날짜' : 'Date'}</label>
+                      <input
+                        type="text"
+                        value={draftDate}
+                        onChange={(e) => setDraftDate(e.target.value)}
+                        placeholder="YYYY.MM.DD"
+                        className="w-full bg-gray-50/50 dark:bg-app-bg rounded-xl border border-gray-100 dark:border-subtle-border px-3.5 py-3 text-sm font-sans text-gray-800 dark:text-text-primary focus:border-blue-500 focus:bg-white dark:focus:bg-[#1a1924] outline-none transition-colors"
+                      />
+                    </div>
+                  </div>
 
-      {/* Import Plan Modal Overlay */}
-      <AnimatePresence>
-        {isImportModalOpen && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end md:items-center justify-center p-0 md:p-4">
-            {/* Modal backdrop closer */}
-            <div className="absolute inset-0" onClick={() => { setIsImportModalOpen(false); setSelectedImportPlan(null); }} />
-            
-            {/* Modal Content */}
-            <motion.div
-              initial={{ opacity: 0, y: 100 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 100 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
-              className="bg-white w-full max-w-md rounded-t-[32px] md:rounded-[32px] overflow-hidden shadow-2xl relative z-10 flex flex-col max-h-[85vh]"
-            >
-              {/* Header */}
-              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-white sticky top-0 z-20">
-                <div className="flex items-center gap-2">
-                  {selectedImportPlan && (
-                    <button
-                      onClick={() => setSelectedImportPlan(null)}
-                      className="p-1.5 hover:bg-gray-50 rounded-lg text-gray-500 hover:text-gray-800 transition-colors"
-                    >
-                      <ArrowLeft size={18} />
-                    </button>
-                  )}
-                  <h3 className="font-sans font-bold text-base text-gray-800">
-                    {selectedImportPlan 
-                      ? (language === 'ko' ? '일정 세부 정보 확인' : 'Confirm Plan Details') 
-                      : (language === 'ko' ? '내 계획에서 불러오기' : 'Import from My Plan')}
-                  </h3>
-                </div>
-                <button
-                  onClick={() => { setIsImportModalOpen(false); setSelectedImportPlan(null); }}
-                  className="p-1.5 hover:bg-gray-50 rounded-lg text-gray-400 hover:text-gray-700 transition-colors"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              {/* Main content body */}
-              <div className="p-6 overflow-y-auto flex-1">
-                {!selectedImportPlan ? (
-                  // Plan List view (ONLY displays main title and dates!)
-                  <div className="space-y-4">
-                    <p className="font-sans text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">
-                      {language === 'ko' ? '계획 목록' : 'Plan List'}
-                    </p>
-                    {!plan ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-center text-gray-400 space-y-2">
-                        <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center border border-dashed border-gray-200">
-                          <FileText size={24} className="text-gray-300" />
-                        </div>
-                        <p className="font-sans text-xs font-semibold text-gray-600">
-                          {language === 'ko' ? '작성된 계획이 없습니다.' : 'No plan available.'}
-                        </p>
-                        <p className="font-sans text-[11px] text-gray-400">
-                          {language === 'ko' ? '새로운 여행 계획을 계획 탭에서 먼저 세워보세요!' : 'Please create a travel plan in the Plan tab first!'}
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <div
-                          onClick={() => setSelectedImportPlan(plan)}
-                          className="bg-gray-50 hover:bg-blue-50/30 border border-gray-100 p-5 rounded-2xl shadow-sm flex items-center justify-between cursor-pointer transition-all active:scale-[0.98] group"
-                        >
-                          <div className="space-y-1.5 min-w-0 flex-1">
-                            <h4 className="font-sans font-extrabold text-gray-800 text-sm truncate group-hover:text-blue-600 transition-colors">
-                              {plan.title}
-                            </h4>
-                            <p className="font-sans text-xs text-gray-500 font-medium flex items-center gap-1.5">
-                              <CalendarDays size={13} className="text-gray-400 shrink-0" />
-                              <span>{plan.startDate} ~ {plan.endDate} ({plan.durationText})</span>
-                            </p>
+                  <div className="space-y-1">
+                    <label className="font-sans font-semibold text-xs text-gray-400 pl-1">{language === 'ko' ? '내용' : 'Content'}</label>
+                    <CanvasEditor 
+                      text={draftContent} 
+                      onChangeText={setDraftContent} 
+                      stamps={draftStamps} 
+                      onChangeStamps={setDraftStamps} 
+                      placeholder={language === 'ko' ? '이 날의 기분과 있었던 일을 자유롭게 적어보세요. (터치/드래그하여 스탬프 이동)' : 'Write down what happened...'}
+                      isDarkMode={isDarkMode}
+                    />
+                    
+                    {draftStamps.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {draftStamps.map((stamp, index) => (
+                          <div key={stamp.id || index} className="relative w-10 h-10 bg-stone-100 dark:bg-surface-secondary rounded-lg flex items-center justify-center group shadow-sm border border-stone-200 dark:border-zinc-700">
+                            {stamp?.imageUrl && (stamp.imageUrl.startsWith('data:image') || stamp.imageUrl.startsWith('/') || stamp.imageUrl.startsWith('http')) ? (
+                               <img src={stamp.imageUrl} alt="stamp" className="w-8 h-8 object-contain" />
+                            ) : (
+                               <span className="text-xl">{stamp?.imageUrl}</span>
+                            )}
+                            <button 
+                              onClick={() => setDraftStamps(draftStamps.filter((_, i) => i !== index))}
+                              className="absolute -top-1.5 -right-1.5 p-1 bg-red-500 text-white rounded-full md:opacity-0 md:group-hover:opacity-100 transition-opacity shadow hover:bg-red-600"
+                            >
+                              <X size={10} />
+                            </button>
                           </div>
-                          <ChevronRight size={18} className="text-gray-300 group-hover:text-blue-500 transition-colors shrink-0 ml-3" />
-                        </div>
+                        ))}
                       </div>
                     )}
                   </div>
-                ) : (
-                  // Detailed Plan contents view
-                  <div className="space-y-5">
-                    {/* Header info card */}
-                    <div className="bg-blue-50/50 border border-blue-100/30 p-5 rounded-2xl space-y-1">
-                      <span className="inline-flex font-mono text-[9px] font-black uppercase tracking-wider text-blue-600 bg-blue-100/60 px-2 py-0.5 rounded-md mb-1">
-                        Travel Plan
-                      </span>
-                      <h4 className="font-sans font-extrabold text-gray-900 text-base">{selectedImportPlan.title}</h4>
-                      <p className="font-sans text-xs text-gray-500 font-medium flex items-center gap-1.5 pt-1">
-                        <CalendarDays size={13} className="text-gray-400" />
-                        <span>{selectedImportPlan.startDate} ~ {selectedImportPlan.endDate} ({selectedImportPlan.durationText})</span>
-                      </p>
-                    </div>
 
-                    {/* Day by Day contents list */}
-                    <div className="space-y-4">
-                      {selectedImportPlan.days.map((day) => (
-                        <div key={day.dayNumber} className="border border-gray-100/80 rounded-2xl bg-white p-4 space-y-3 shadow-sm">
-                          <div className="flex justify-between items-center border-b border-gray-100 pb-2">
-                            <span className="font-sans font-black text-xs text-gray-800 flex items-center gap-1.5">
-                              <span className="text-xs">📅</span> {language === 'ko' ? `${day.dayNumber}일차` : `Day ${day.dayNumber}`} ({day.dayOfWeek})
-                            </span>
-                            <span className="font-mono text-[10px] text-gray-400 font-medium">{day.date}</span>
-                          </div>
-                          {day.items.length === 0 ? (
-                            <p className="text-xs text-gray-400 italic">
-                              {language === 'ko' ? '등록된 세부 일정이 없습니다.' : 'No schedules registered.'}
-                            </p>
-                          ) : (
-                            <div className="space-y-4 pl-3.5 relative before:content-[''] before:absolute before:left-[4px] before:top-2 before:bottom-2 before:w-[1.5px] before:bg-blue-100/50">
-                              {day.items.map((item, idx) => (
-                                <div key={`${item.id}-${idx}`} className="relative space-y-1">
-                                  <div className="absolute left-[-16.5px] top-[4px] w-2 h-2 rounded-full bg-blue-500 border border-white shadow-sm" />
-                                  <div className="flex items-start justify-between gap-2">
-                                    <span className="font-sans font-extrabold text-xs text-gray-800 leading-tight flex-1">{item.title}</span>
-                                    {item.time && (
-                                      <span className="font-mono text-[9px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md shrink-0">
-                                        {item.time}
-                                      </span>
-                                    )}
-                                  </div>
-                                  {item.content && (
-                                    <p className="font-sans text-[11px] text-gray-500 leading-relaxed whitespace-pre-wrap">{item.content}</p>
-                                  )}
-                                  {item.images && item.images.length > 0 && (
-                                    <div className="pt-1.5">
-                                      <img
-                                        src={item.images[0]}
-                                        alt={item.title}
-                                        className="w-full h-24 object-cover rounded-xl border border-gray-100"
-                                        referrerPolicy="no-referrer"
-                                      />
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
+                  <div className="flex gap-2 pt-2">
+                    <button onClick={() => fileInputRef.current?.click()} className="flex-1 h-12 bg-gray-50 dark:bg-app-bg border border-gray-100 dark:border-subtle-border rounded-xl flex items-center justify-center gap-2 text-stone-600 dark:text-stone-300 hover:bg-gray-100 dark:hover:bg-[#1c1a29] transition-colors font-medium text-sm">
+                      <ImageIcon size={18} className="text-blue-500" />
+                      <span>{language === 'ko' ? '사진 추가' : 'Add Photo'}</span>
+                    </button>
+                    <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
+
+                    <button onClick={() => setIsStampDrawerOpen(true)} className="flex-1 h-12 bg-gray-50 dark:bg-app-bg border border-gray-100 dark:border-subtle-border rounded-xl flex items-center justify-center gap-2 text-stone-600 dark:text-stone-300 hover:bg-gray-100 dark:hover:bg-[#1c1a29] transition-colors font-medium text-sm">
+                      <SmilePlus size={18} className="text-purple-500" />
+                      <span>{language === 'ko' ? '스탬프 추가' : 'Add Stamp'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+
+            {/* Stamp Drawer Overlay */}
+            <AnimatePresence>
+              {isStampDrawerOpen && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  onClick={() => setIsStampDrawerOpen(false)}
+                  className="fixed inset-0 bg-black/20 z-[55] md:max-w-md md:mx-auto"
+                />
+              )}
+            </AnimatePresence>
+
+            {/* Stamp Drawer */}
+            <AnimatePresence>
+              {isStampDrawerOpen && (
+                <motion.div
+                  initial={{ y: '100%' }}
+                  animate={{ y: 0 }}
+                  exit={{ y: '100%' }}
+                  transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+                  className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white dark:bg-surface-primary rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.15)] z-[60] flex flex-col max-h-[60vh] border-t border-stone-200 dark:border-subtle-border"
+                >
+                  <div className="flex justify-between items-center p-4 border-b border-stone-100 dark:border-subtle-border">
+                    <h4 className="font-bold text-lg text-stone-800 dark:text-text-primary">{language === 'ko' ? '스탬프 선택' : 'Select Stamp'}</h4>
+                    <button onClick={() => setIsStampDrawerOpen(false)} className="p-2 text-stone-400 hover:text-stone-600 dark:hover:text-zinc-200 bg-stone-50 dark:bg-surface-secondary rounded-full transition-colors">
+                      <X size={20} />
+                    </button>
+                  </div>
+                  
+                  <div className="p-4 overflow-y-auto custom-scrollbar">
+                    <div className="grid grid-cols-3 gap-3">
+                      {defaultStamps.map(stamp => (
+                        <button
+                          key={stamp.id}
+                          onClick={() => {
+                            handleAddStampToCanvas(stamp.imageUrl);
+                            setIsStampDrawerOpen(false);
+                          }}
+                          className="aspect-square bg-stone-50 dark:bg-surface-secondary border border-stone-100 dark:border-subtle-border rounded-2xl flex items-center justify-center hover:bg-stone-100 dark:hover:bg-zinc-700 hover:scale-105 active:scale-95 transition-all p-2"
+                        >
+                          <img src={stamp.imageUrl} alt="stamp" className="w-full h-full object-contain drop-shadow-sm" />
+                        </button>
                       ))}
                     </div>
-                  </div>
-                )}
-              </div>
 
-              {/* Bottom Footer Action (only in details view) */}
-              {selectedImportPlan && (
-                <div className="p-6 border-t border-gray-100 bg-gray-50/50 flex items-center justify-end sticky bottom-0 z-15">
-                  <button
-                    onClick={() => handleImportPlan(selectedImportPlan)}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-sans font-bold text-xs px-6 py-3.5 rounded-2xl shadow-md active:scale-95 transition-all flex items-center justify-center gap-2"
-                  >
-                    <Check size={14} />
-                    {language === 'ko' ? '이 계획 기록으로 불러오기' : 'Import This Plan to Memory'}
-                  </button>
-                </div>
+                    {customStamps.length > 0 && (
+                      <div className="mt-6">
+                        <p className="text-sm font-bold text-stone-500 dark:text-stone-400 mb-3 px-1">{language === 'ko' ? '내 스탬프' : 'My Stamps'}</p>
+                        <div className="grid grid-cols-3 gap-3">
+                          {customStamps.map(stamp => (
+                            <div key={stamp.id} className="relative aspect-square group">
+                              <button
+                                onClick={() => {
+                                  handleAddStampToCanvas(stamp.imageUrl);
+                                  setIsStampDrawerOpen(false);
+                                }}
+                                className="w-full h-full bg-stone-50 dark:bg-surface-secondary border border-stone-100 dark:border-subtle-border rounded-2xl flex items-center justify-center hover:bg-stone-100 dark:hover:bg-zinc-700 transition-all p-2"
+                              >
+                                <img src={stamp.imageUrl} alt="custom stamp" className="w-full h-full object-contain drop-shadow-sm" />
+                              </button>
+                              <button
+                                onClick={(e) => handleDeleteCustomStamp(stamp.id, e)}
+                                className="absolute -top-2 -right-2 p-1.5 bg-red-500 text-white rounded-full md:opacity-0 md:group-hover:opacity-100 transition-opacity shadow-md hover:bg-red-600"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="mt-6 pt-4 border-t border-stone-100 dark:border-subtle-border">
+                      <button onClick={() => stampInputRef.current?.click()} className="w-full py-3 border-2 border-dashed border-stone-300 dark:border-zinc-700 rounded-xl flex items-center justify-center gap-2 text-stone-500 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-zinc-800 hover:text-blue-500 dark:hover:text-blue-400 hover:border-blue-400 transition-colors font-medium">
+                        <Plus size={18} />
+                        <span>{language === 'ko' ? '나만의 스탬프 추가' : 'Add Custom Stamp'}</span>
+                      </button>
+                      <input type="file" ref={stampInputRef} onChange={handleStampUpload} accept="image/*" className="hidden" />
+                    </div>
+                  </div>
+                </motion.div>
               )}
-            </motion.div>
-          </div>
+            </AnimatePresence>
+          </>
         )}
       </AnimatePresence>
 
-      {/* Stamp Detail Modal Overlay */}
+      {/* Viewing Modal */}
       <AnimatePresence>
-        {selectedLog && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-4">
-            <div className="absolute inset-0" onClick={() => setSelectedLog(null)} />
-            
+        {viewingLog && (
+          <>
+            {/* Backdrop Overlay */}
             <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className="bg-[#faf6eb] dark:bg-[#13121a] text-stone-800 dark:text-stone-100 w-full max-w-sm rounded-[32px] overflow-hidden shadow-2xl relative z-10 border border-stone-200/80 dark:border-[#262435] flex flex-col max-h-[85vh]"
-            >
-              {/* guilloche pattern background */}
-              <div className="absolute inset-0 opacity-[0.03] pointer-events-none select-none bg-[radial-gradient(#1e3a8a_1px,transparent_1px)] [background-size:16px_16px]" />
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setViewingLog(null)}
+              className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm md:max-w-md md:mx-auto"
+            />
 
-              {/* Header */}
-              <div className="px-6 py-4 border-b border-stone-200/60 dark:border-[#262435] flex items-center justify-between bg-stone-100/50 dark:bg-[#1a1924] sticky top-0 z-20">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm">🛂</span>
-                  <h3 className="font-sans font-black text-xs text-stone-600 dark:text-stone-400 uppercase tracking-widest font-mono">
-                    {language === 'ko' ? '출입국 기록 증명 / Certificate' : 'Certificate of Entry/Exit'}
-                  </h3>
-                </div>
-                <button
-                  onClick={() => setSelectedLog(null)}
-                  className="p-1.5 hover:bg-stone-200/50 dark:hover:bg-stone-800 rounded-lg text-stone-400 dark:text-stone-500 hover:text-stone-700 dark:hover:text-stone-300 transition-colors"
-                >
-                  <X size={18} />
-                </button>
+            {/* Bottom Sheet Container */}
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="fixed bottom-0 left-0 right-0 z-50 bg-white dark:bg-surface-primary rounded-t-[28px] h-[86vh] max-h-[86vh] overflow-hidden flex flex-col shadow-2xl md:max-w-md md:mx-auto border-t border-gray-100 dark:border-subtle-border"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Drag Indicator Handle */}
+              <div className="w-full flex justify-center py-3">
+                <div className="w-12 h-1 bg-gray-300 dark:bg-zinc-700 rounded-full" />
               </div>
 
-              {/* Content body */}
-              <div className="p-6 overflow-y-auto flex-1 space-y-4">
-                {/* Image & Stamp Stickers Overlap */}
-                {(() => {
-                  let isScrapbook = false;
-                  let scrapbookData: any = null;
-                  if (selectedLog.content && selectedLog.content.startsWith('{')) {
-                    try {
-                      scrapbookData = JSON.parse(selectedLog.content);
-                      isScrapbook = true;
-                    } catch (e) {}
-                  }
+              <div className="p-6 overflow-y-auto pb-12 flex-1 custom-scrollbar">
+                <button
+                  onClick={() => setViewingLog(null)}
+                  className="absolute top-4 right-4 p-2 text-stone-500 hover:bg-stone-100 dark:hover:bg-zinc-800 rounded-full transition-colors z-10"
+                >
+                  <X size={20} />
+                </button>
 
-                  return (
-                    <div className="relative w-full h-48 rounded-2xl overflow-hidden bg-stone-100 dark:bg-[#1a1924] border border-stone-200 dark:border-[#262435] shadow-sm">
-                      {selectedLog.image ? (
-                        <img
-                          src={selectedLog.image}
-                          alt={selectedLog.title}
-                          className="w-full h-full object-cover"
-                          referrerPolicy="no-referrer"
-                        />
-                      ) : (
-                        <div className="w-full h-full bg-stone-100 dark:bg-[#1a1924] flex items-center justify-center text-stone-400 dark:text-stone-500 text-xs font-semibold">
-                          {t('photo_none')}
-                        </div>
-                      )}
-
-                      {/* Floating Overlap Stamp Stickers */}
-                      {isScrapbook && scrapbookData?.stickers && scrapbookData.stickers.length > 0 && (
-                        <div className="absolute top-2.5 right-2.5 flex flex-wrap gap-1 max-w-[80%] justify-end pointer-events-none select-none z-10">
-                          {scrapbookData.stickers.map((emoji: string, idx: number) => {
-                            const preset = PRESET_STICKERS.find(p => p.emoji === emoji);
-                            return (
-                              <div
-                                key={idx}
-                                className="bg-white/95 text-stone-800 rounded-xl px-2 py-1 flex items-center gap-1 text-[10px] font-black border border-stone-200 shadow-md"
-                                style={{
-                                  transform: `rotate(${(idx % 2 === 0 ? 5 : -5) * (idx + 1)}deg) translateY(${idx * 1.5}px)`,
-                                }}
-                              >
-                                <span>{emoji}</span>
-                                {preset && <span className="text-[7px] text-stone-500 font-bold uppercase tracking-tight">{preset.label}</span>}
-                              </div>
-                            );
-                          })}
+                <div className="flex flex-col gap-4">
+                  <h2 className="font-logo font-bold text-2xl text-stone-900 dark:text-text-primary pr-12">{viewingLog.title}</h2>
+                  
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-stone-100 dark:border-subtle-border">
+                    <div className="flex flex-wrap items-center gap-3 text-sm text-stone-500 dark:text-text-secondary">
+                      <div className="flex items-center gap-1.5">
+                        <CalendarDays size={16} />
+                        <span>{viewingLog.date}</span>
+                      </div>
+                      {viewingLog.location && (
+                        <div className="flex items-center gap-1.5">
+                          <MapPin size={16} />
+                          <span>{viewingLog.location}</span>
                         </div>
                       )}
                     </div>
-                  );
-                })()}
 
-                {/* Stamp Details */}
-                <div className="space-y-4">
-                  <div className="flex justify-between items-start">
-                    <h4 className="font-sans font-black text-stone-900 dark:text-stone-100 text-lg">
-                      {selectedLog.title}
-                    </h4>
-                  </div>
-
-                  {/* Metadata */}
-                  <div className="flex flex-wrap gap-1.5">
-                    {selectedLog.location && (
-                      <span className="bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5">
-                        <MapPin size={12} />
-                        {selectedLog.location}
-                      </span>
-                    )}
-                    <span className="bg-stone-100 dark:bg-[#1a1924] text-stone-600 dark:text-stone-400 px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5">
-                      <CalendarDays size={12} />
-                      {selectedLog.date}
-                    </span>
-                    {selectedLog.tag && (
-                      <span className="bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5">
-                        <Waves size={12} />
-                        {selectedLog.tag}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Scrapbook content layout */}
-                  {(() => {
-                    let isScrapbook = false;
-                    let scrapbookData: any = null;
-                    if (selectedLog.content && selectedLog.content.startsWith('{')) {
-                      try {
-                        scrapbookData = JSON.parse(selectedLog.content);
-                        isScrapbook = true;
-                      } catch (e) {}
-                    }
-
-                    if (isScrapbook && scrapbookData) {
-                      return (
-                        <div className="space-y-4">
-                          {/* Stickers row */}
-                          <div className="grid grid-cols-2 gap-2">
-                            <div className="bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200/50 dark:border-amber-900/30 p-2.5 rounded-2xl flex items-center gap-2">
-                              <span className="text-xl">🎭</span>
-                              <div className="text-left">
-                                <span className="block text-[8px] text-amber-500 dark:text-amber-400 font-bold leading-none">{t('mood_label_short')}</span>
-                                <span className="text-xs font-sans font-extrabold text-stone-700 dark:text-stone-200">{scrapbookData.mood}</span>
-                              </div>
-                            </div>
-                            <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/40 dark:border-blue-900/30 p-2.5 rounded-2xl flex items-center gap-2">
-                              <span className="text-xl">🌤️</span>
-                              <div className="text-left">
-                                <span className="block text-[8px] text-blue-500 dark:text-blue-400 font-bold leading-none">{t('weather_label_short')}</span>
-                                <span className="text-xs font-sans font-extrabold text-stone-700 dark:text-stone-200">{scrapbookData.weather}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Story Text - styled like aesthetic notebook */}
-                          <div className="bg-white dark:bg-[#1a1924] border-2 border-stone-200/80 dark:border-[#262435] p-4 rounded-2xl shadow-sm relative overflow-hidden text-left">
-                            {/* cute paper lines background lines */}
-                            <div className="absolute inset-0 opacity-[0.04] pointer-events-none select-none bg-[repeating-linear-gradient(transparent,transparent_23px,#000_23px,#000_24px)]" />
-                            <p className="font-sans text-xs text-stone-500 dark:text-stone-400 font-black uppercase tracking-widest border-b border-stone-100 dark:border-[#262435] pb-1 mb-2">My Story 📖</p>
-                            <p className="font-sans text-xs sm:text-sm text-stone-700 dark:text-stone-200 leading-relaxed relative z-10 font-medium">
-                              {scrapbookData.story}
-                            </p>
-                          </div>
-
-                          {/* Extra Memories */}
-                          {(scrapbookData.anecdote || scrapbookData.bestBite) && (
-                            <div className="space-y-2">
-                              {scrapbookData.bestBite && (
-                                <div className="bg-orange-50/50 dark:bg-orange-950/20 border border-orange-200/30 dark:border-orange-900/30 p-3 rounded-2xl space-y-1 text-left">
-                                  <span className="inline-flex items-center gap-1 text-[9px] font-black text-orange-600 dark:text-orange-400 uppercase bg-orange-100/50 dark:bg-orange-950/40 px-2 py-0.5 rounded-md">
-                                    {language === 'ko' ? '🍕 최고의 한 입 (Yum!)' : '🍕 Best Bite (Yum!)'}
-                                  </span>
-                                  <p className="font-sans text-xs text-stone-700 dark:text-stone-200 font-bold">{scrapbookData.bestBite}</p>
-                                </div>
-                              )}
-                              {scrapbookData.anecdote && (
-                                <div className="bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200/30 dark:border-purple-900/30 p-3 rounded-2xl space-y-1 text-left">
-                                  <span className="inline-flex items-center gap-1 text-[9px] font-black text-purple-600 dark:text-purple-400 uppercase bg-purple-100/50 dark:bg-purple-950/40 px-2 py-0.5 rounded-md">
-                                    {language === 'ko' ? '💡 소소한 해프닝 / 기억에 남는 일' : '💡 Cozy Anecdote / Memoir'}
-                                  </span>
-                                  <p className="font-sans text-xs text-stone-600 dark:text-stone-300 leading-relaxed whitespace-pre-wrap">{scrapbookData.anecdote}</p>
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {/* Selected Stamp Stickers */}
-                          {scrapbookData.stickers && scrapbookData.stickers.length > 0 && (
-                            <div className="bg-stone-50 dark:bg-[#1a1924] border border-stone-200/60 dark:border-[#262435] p-3.5 rounded-2xl text-left space-y-2">
-                              <span className="text-[9px] font-black text-stone-500 dark:text-stone-400 uppercase tracking-widest block">{t('stamps_record_header')}</span>
-                              <div className="flex flex-wrap gap-1.5">
-                                {scrapbookData.stickers.map((emoji: string, i: number) => {
-                                  const preset = PRESET_STICKERS.find(p => p.emoji === emoji);
-                                  return (
-                                    <span key={i} className="bg-white dark:bg-[#13121a] border border-stone-200 dark:border-[#2b2a3c] text-[10px] text-stone-700 dark:text-stone-200 px-2.5 py-1 rounded-xl font-bold flex items-center gap-1 shadow-xs">
-                                      <span className="text-sm">{emoji}</span>
-                                      <span className="text-[8px] text-stone-400 dark:text-stone-500 uppercase font-sans tracking-wider">{preset ? preset.label : 'STAMP'}</span>
-                                    </span>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Checked spots / locations visited */}
-                          {scrapbookData.visitedSpots && scrapbookData.visitedSpots.length > 0 && (
-                            <div className="bg-stone-50 dark:bg-[#1a1924] border border-stone-200/60 dark:border-[#262435] p-3.5 rounded-2xl text-left space-y-2">
-                              <span className="text-[9px] font-black text-stone-500 dark:text-stone-400 uppercase tracking-widest block">{t('visited_spots_header')}</span>
-                              <div className="flex flex-wrap gap-1.5">
-                                {scrapbookData.visitedSpots.map((spot: string, i: number) => (
-                                  <span key={i} className="bg-white dark:bg-[#13121a] border border-stone-200 dark:border-[#2b2a3c] text-[10px] text-stone-700 dark:text-stone-200 px-2 py-1 rounded-xl font-medium flex items-center gap-1 shadow-xs">
-                                    <span className="text-emerald-500">✓</span> {spot}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    }
-
-                    // Fallback to legacy/simple text display
-                    return (
-                      <div className="bg-white/80 dark:bg-[#1a1924] p-4 rounded-2xl border border-stone-200/50 dark:border-[#262435] shadow-inner text-left">
-                        <p className="font-sans text-sm text-stone-700 dark:text-stone-200 leading-relaxed whitespace-pre-wrap">
-                          {selectedLog.content}
-                        </p>
+                    {!isConfirmingDelete ? (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => {
+                            setViewingLog(null);
+                            handleStartEdit(viewingLog);
+                          }}
+                          className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-stone-600 dark:text-stone-300 bg-stone-100 dark:bg-zinc-800 hover:bg-stone-200 dark:hover:bg-zinc-700 rounded-full transition-colors"
+                          title={language === 'ko' ? '기록 수정' : 'Edit Log'}
+                        >
+                          <PenTool size={13} />
+                          <span>{language === 'ko' ? '수정' : 'Edit'}</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setIsConfirmingDelete(true);
+                          }}
+                          className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/20 hover:bg-red-100 dark:hover:bg-red-950/40 rounded-full transition-colors"
+                          title={language === 'ko' ? '기록 삭제' : 'Delete Log'}
+                        >
+                          <Trash2 size={13} />
+                          <span>{language === 'ko' ? '삭제' : 'Delete'}</span>
+                        </button>
                       </div>
-                    );
-                  })()}
+                    ) : (
+                      <div className="flex items-center gap-2 bg-red-50 dark:bg-red-950/20 px-3 py-1 rounded-2xl border border-red-100 dark:border-red-900/30">
+                        <span className="text-xs font-semibold text-red-700 dark:text-red-400">
+                          {language === 'ko' ? '정말 삭제할까요?' : 'Delete this log?'}
+                        </span>
+                        <button
+                          onClick={() => {
+                            onDeleteLog(viewingLog.id);
+                            setIsConfirmingDelete(false);
+                            setViewingLog(null);
+                          }}
+                          className="px-2 py-0.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                        >
+                          {language === 'ko' ? '삭제' : 'Delete'}
+                        </button>
+                        <button
+                          onClick={() => setIsConfirmingDelete(false)}
+                          className="px-2 py-0.5 text-xs font-semibold text-stone-600 dark:text-stone-400 bg-stone-100 dark:bg-zinc-800 hover:bg-stone-200 dark:hover:bg-zinc-700 rounded-lg transition-colors"
+                        >
+                          {language === 'ko' ? '취소' : 'Cancel'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div className="border rounded-2xl p-2 bg-stone-50 dark:bg-surface-secondary mt-1">
+                    <CanvasEditor 
+                      text={viewingLog.content || ''} 
+                      stamps={(Array.isArray(viewingLog.stamps) ? viewingLog.stamps : []).filter(Boolean).map((s, i) => {
+                        if (typeof s === 'string') {
+                          return { id: `legacy-${i}`, imageUrl: s, x: 20 + i*10, y: 20 + i*10, w: 40, h: 40 } as any;
+                        }
+                        return {
+                          ...s,
+                          id: s.id !== undefined && s.id !== null ? String(s.id) : `stamp-${i}`
+                        };
+                      })} 
+                      readOnly 
+                      isDarkMode={isDarkMode}
+                    />
+                  </div>
                 </div>
               </div>
-
-              {/* Footer Actions */}
-              <div className="p-4 border-t border-stone-200/60 dark:border-[#262435] bg-stone-100/50 dark:bg-[#13121a] flex items-center justify-between sticky bottom-0 z-15 gap-2">
-                <button
-                  onClick={() => {
-                    if (confirm(language === 'ko' ? '이 여행 기록을 지우시겠습니까?' : 'Are you sure you want to delete this memory?')) {
-                      onDeleteLog(selectedLog.id);
-                      setSelectedLog(null);
-                      // Adjust active index
-                      if (activeLogIndex > 0) {
-                        setActiveLogIndex(activeLogIndex - 1);
-                      }
-                    }
-                  }}
-                  className="bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-400 px-3 py-2.5 rounded-xl font-sans text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 shrink-0"
-                >
-                  <Trash2 size={14} />
-                  {t('delete')}
-                </button>
-                <button
-                  onClick={() => handleStartEdit(selectedLog)}
-                  className="bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-400 px-3.5 py-2.5 rounded-xl font-sans text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 flex-1 justify-center"
-                >
-                  <PenTool size={14} />
-                  {t('edit')}
-                </button>
-                <button
-                  onClick={() => setSelectedLog(null)}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl font-sans text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 shrink-0"
-                >
-                  <Check size={14} />
-                  {language === 'ko' ? '확인' : 'OK'}
-                </button>
-              </div>
             </motion.div>
-          </div>
+          </>
         )}
       </AnimatePresence>
     </div>
