@@ -1,7 +1,11 @@
 import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import { initializeFirestore, setLogLevel } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
+
+try {
+  setLogLevel('error');
+} catch (_e) {}
 
 const firebaseConfig = {
   projectId: "gen-lang-client-0177221054",
@@ -13,7 +17,9 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, "ai-studio-trippo-ff4554d0-30e6-46ce-9ce9-47e9504b809c");
+export const db = initializeFirestore(app, {
+  experimentalForceLongPolling: true
+}, "ai-studio-trippo-ff4554d0-30e6-46ce-9ce9-47e9504b809c");
 export const auth = getAuth(app);
 
 // Initialize App Check

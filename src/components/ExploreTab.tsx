@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { DestinationSearchItem } from '../types/destination';
 import {
   Star,
   Sun,
@@ -25,14 +26,28 @@ import {
   RefreshCw,
   ExternalLink,
   X,
-  Loader2
+  Loader2,
+  BarChart3,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import GooglePlaceInput from './GooglePlaceInput';
-import { Language } from '../utils/translations';
+import { Language, translations } from '../utils/translations';
+import { calculateTripDuration } from '../services/reportEngine';
+import { getRatingConfig } from '../types/reportTypes';
+import {
+  normalizeTravelSuitability,
+  TRAVEL_SUITABILITY_CONFIG,
+  getSubScoreStatus
+} from '../config/travelSuitabilityConfig';
 
 interface ExploreTabProps {
-  onSelectDestination?: (destName: string, startDate?: string, endDate?: string) => void;
+  onSelectDestination?: (
+    destName: string,
+    startDate?: string,
+    endDate?: string,
+    context?: { placeId?: string; countryCode?: string; countryName?: string; timezoneId?: string; city?: string }
+  ) => void;
   language?: Language;
   isDarkMode?: boolean;
 }
@@ -46,7 +61,7 @@ const LOCAL_TRANS = {
     popular_suggestions: "요즘 인기 있는 대표 여행지",
     search_btn: "로컬 여행 정보 분석하기",
     searching_btn: "도시 분석 보고서 생성 중...",
-    recommendation_score: "로컬 여행 추천 지수",
+    recommendation_score: "여행 적합성",
     score_narrative: "종합 로컬 분석 보고서",
     festivals_title: "🎉 여행 기간 중 펼쳐지는 축제 & 이벤트",
     festivals_desc: "현지의 정취를 생생하게 체험할 수 있는 로컬 축제 정보입니다.",
@@ -72,7 +87,7 @@ const LOCAL_TRANS = {
     popular_suggestions: "Trending Local Destinations",
     search_btn: "Analyze Destination Info",
     searching_btn: "Generating Local Analysis...",
-    recommendation_score: "Travel Advisory Score",
+    recommendation_score: "Travel Suitability",
     score_narrative: "Local Travel Narrative",
     festivals_title: "🎉 Active Representative Festivals & Events",
     festivals_desc: "Official local celebrations and verified events happening during your travel window.",
@@ -888,6 +903,60 @@ const translateSensoryStatus = (sensory?: string, lang: Language = 'ko'): string
   return map[s] || s;
 };
 
+async function parseJsonResponse<T>(
+  response: Response,
+  endpoint: string
+): Promise<T> {
+  const contentType = response.headers.get('content-type') || '';
+  const rawText = await response.text();
+
+  let parsed: any = null;
+
+  if (rawText.trim()) {
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      const preview = rawText
+        .replace(/\s+/g, ' ')
+        .slice(0, 200);
+
+      throw new Error(
+        `INVALID_SERVER_RESPONSE: ${endpoint} returned non-JSON data. ` +
+        `status=${response.status}, contentType=${contentType}, preview=${preview}`
+      );
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      parsed?.message ||
+      parsed?.error ||
+      `Request failed with status ${response.status}.`
+    );
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(
+      `EMPTY_SERVER_RESPONSE: ${endpoint} returned an empty response.`
+    );
+  }
+
+  return parsed as T;
+}
+
+function isValidDestinationAnalysis(data: any): boolean {
+  if (!data || typeof data !== 'object') return false;
+  return Boolean(
+    data.id ||
+    data.placeId ||
+    data.weather ||
+    data.report ||
+    data.summary ||
+    data.recommendationScore !== undefined ||
+    data.status
+  );
+}
+
 const translateTipToEnglish = (tip: string): string => {
   if (!tip) return '';
   if (/[a-zA-Z]{4,}/.test(tip)) return tip;
@@ -976,13 +1045,14 @@ const getDaysInMonth = (date: Date): CalendarDay[] => {
 };
 
 export default function ExploreTab({ onSelectDestination, language = 'ko', isDarkMode = false }: ExploreTabProps) {
-  const txt = LOCAL_TRANS[language];
+  const txt = { ...(translations[language] || translations.ko), ...(LOCAL_TRANS[language] || LOCAL_TRANS.ko) };
 
   // Search input states
   const [destName, setDestName] = useState('');
   const [destAddress, setDestAddress] = useState('');
   const [destPlaceId, setDestPlaceId] = useState('');
   const [destLatLng, setDestLatLng] = useState<{ lat: number; lng: number } | undefined>(undefined);
+  const [selectedDestination, setSelectedDestination] = useState<DestinationSearchItem | null>(null);
 
   const [startDate, setStartDate] = useState('2026-07-22');
   const [endDate, setEndDate] = useState('2026-07-29');
@@ -1013,6 +1083,12 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
 
   // Festival Detail Modal state
   const [selectedFestival, setSelectedFestival] = useState<any | null>(null);
+
+  // Analysis Accordion State
+  const [showAnalysisDetails, setShowAnalysisDetails] = useState(false);
+
+  // Transition Lock State to prevent double-tap
+  const [isAddingToPlan, setIsAddingToPlan] = useState(false);
 
   const openCalendarWithStep = (step: 'start' | 'end') => {
     setCalendarStep(step);
@@ -1085,7 +1161,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
   const triggerSearchWithResolved = async (
     nameVal: string,
     addrVal: string,
-    latLngVal: { lat: number; lng: number },
+    latLngVal: { lat: number; lng: number } | undefined,
     pIdVal: string,
     countryCodeVal: string,
     timezoneVal: string,
@@ -1104,6 +1180,25 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
 
     const requestId = ++latestRequestIdRef.current;
 
+    const safeName = nameVal?.trim() || 'Seoul';
+    const safeAddr = (addrVal && addrVal.trim()) ? addrVal.trim() : safeName;
+    const safePlaceId = (pIdVal && pIdVal.trim()) ? pIdVal.trim() : `place_${safeName.replace(/\s+/g, '_')}`;
+    const safeCountryCode = (countryCodeVal && countryCodeVal !== 'auto') ? countryCodeVal : getNormalizedClientCountry(safeAddr, safeName);
+    const safeTimezone = (timezoneVal && timezoneVal.trim() && timezoneVal !== 'UTC') ? timezoneVal.trim() : (tzMap[safeCountryCode] || 'UTC');
+
+    let safeLat = 37.5665;
+    let safeLng = 126.9780;
+    if (latLngVal && typeof latLngVal.lat === 'number' && typeof latLngVal.lng === 'number' && !isNaN(latLngVal.lat) && !isNaN(latLngVal.lng) && (latLngVal.lat !== 0 || latLngVal.lng !== 0)) {
+      safeLat = latLngVal.lat;
+      safeLng = latLngVal.lng;
+    } else {
+      const popMatch = POPULAR_PLACES.find(p => p.placeId === safePlaceId || p.nameEn.toLowerCase().includes(safeName.toLowerCase()) || p.nameKo.includes(safeName));
+      if (popMatch) {
+        safeLat = popMatch.lat;
+        safeLng = popMatch.lng;
+      }
+    }
+
     try {
       setAnalysisStage('fetching_data');
       const res = await fetch('/app-api/explore/search', {
@@ -1114,13 +1209,13 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
         },
         signal: controller.signal,
         body: JSON.stringify({
-          placeId: pIdVal,
-          name: nameVal,
-          country: addrVal,
-          countryCode: countryCodeVal,
-          timezoneId: timezoneVal,
-          latitude: latLngVal.lat,
-          longitude: latLngVal.lng,
+          placeId: safePlaceId,
+          name: safeName,
+          country: safeAddr,
+          countryCode: safeCountryCode,
+          timezoneId: safeTimezone,
+          latitude: safeLat,
+          longitude: safeLng,
           startDate,
           endDate,
           forceRefresh: force,
@@ -1132,29 +1227,11 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
         return;
       }
 
-      if (!res.ok) {
-        let errMsg = 'Failed to search travel information.';
-        try {
-          const errData = await res.json();
-          errMsg = errData.message || errData.error || errMsg;
-        } catch (_) {
-          try {
-            const rawText = await res.text();
-            if (rawText.includes("<title>")) {
-              const match = rawText.match(/<title>(.*?)<\/title>/);
-              if (match) errMsg = match[1];
-            }
-          } catch (_) {}
-        }
-        throw new Error(errMsg);
-      }
-
       setAnalysisStage('generating_summary');
-      let data;
-      try {
-        data = await res.json();
-      } catch (jsonErr: any) {
-        throw new Error('Received an invalid response from the server. Please try again.');
+      const data = await parseJsonResponse<any>(res, '/app-api/explore/search');
+
+      if (!isValidDestinationAnalysis(data)) {
+        throw new Error('INVALID_ANALYSIS_SCHEMA: Received an invalid destination analysis data structure.');
       }
 
       if (requestId !== latestRequestIdRef.current) {
@@ -1185,9 +1262,32 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
       setSearchResult(data);
       setAnalysisStage('completed');
     } catch (err: any) {
+      const rawMsg = err?.message || '';
       if (err.name === 'AbortError') return;
-      console.error(err);
-      setSearchError(err.message || 'An error occurred during travel data processing.');
+
+      console.error('[EXPLORE_API_RESPONSE_ERROR]', {
+        requestId,
+        endpoint: '/app-api/explore/search',
+        errorMsg: rawMsg,
+        currentOrigin: typeof window !== 'undefined' ? window.location.origin : '',
+        timestamp: new Date().toISOString()
+      });
+
+      if (
+        rawMsg.startsWith('INVALID_SERVER_RESPONSE') ||
+        rawMsg.startsWith('EMPTY_SERVER_RESPONSE') ||
+        rawMsg.startsWith('INVALID_ANALYSIS_SCHEMA')
+      ) {
+        setSearchError(
+          language === 'ko'
+            ? '여행 정보를 분석하는 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.'
+            : 'Failed to connect to the travel analysis server. Please try again in a moment.'
+        );
+      } else {
+        setSearchError(
+          rawMsg || (language === 'ko' ? '여행 데이터 처리 중 오류가 발생했습니다.' : 'An error occurred during travel data processing.')
+        );
+      }
       setAnalysisStage('error');
     } finally {
       if (requestId === latestRequestIdRef.current) {
@@ -1212,66 +1312,20 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
     const controller = new AbortController();
     activeAbortControllerRef.current = controller;
 
-    // A. Check if destination needs resolution
+    // A. Check if destination is fully selected and resolved
     if (destPlaceId && destLatLng) {
       // Already fully resolved! Proceed directly.
       const countryCodeClean = getNormalizedClientCountry(destAddress, destName);
       const tzClean = tzMap[countryCodeClean] || 'UTC';
       await triggerSearchWithResolved(destName, destAddress, destLatLng, destPlaceId, countryCodeClean, tzClean, force, forceWeather);
     } else {
-      // Needs Places API resolution!
-      setAnalysisStage('resolving_destination');
-      try {
-        const resolveRes = await fetch('/app-api/places/resolve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: destName.trim(), language }),
-          signal: controller.signal
-        });
-
-        if (controller.signal.aborted) return;
-
-        if (!resolveRes.ok) {
-          throw new Error(language === 'ko' ? '여행지 정보를 분석하는 데 실패했습니다. 다시 시도해 주세요.' : 'Failed to resolve travel destination. Please try again.');
-        }
-
-        const resolveData = await resolveRes.json();
-
-        if (resolveData.status === 'not_found') {
-          throw new Error(language === 'ko' ? `올바른 여행지를 찾을 수 없습니다: "${destName}"` : `Could not find a valid destination for: "${destName}"`);
-        }
-
-        if (resolveData.status === 'ambiguous') {
-          setAmbiguousCandidates(resolveData.candidates);
-          setAnalysisStage('idle');
-          setIsAnalyzing(false);
-          return;
-        }
-
-        const resolved = resolveData.destination;
-        setDestName(resolved.canonicalName);
-        setDestAddress(resolved.formattedAddress);
-        setDestPlaceId(resolved.placeId);
-        setDestLatLng({ lat: resolved.latitude, lng: resolved.longitude });
-
-        await triggerSearchWithResolved(
-          resolved.canonicalName,
-          resolved.formattedAddress,
-          { lat: resolved.latitude, lng: resolved.longitude },
-          resolved.placeId,
-          resolved.countryCode,
-          resolved.timezoneId,
-          force,
-          forceWeather
-        );
-
-      } catch (err: any) {
-        if (err.name === 'AbortError') return;
-        console.error("[Manual Resolve Failed]", err);
-        setSearchError(err.message || 'Failed to resolve destination coordinates.');
-        setAnalysisStage('error');
-        setIsAnalyzing(false);
-      }
+      // Must select from the autocomplete list!
+      setSearchError(
+        language === 'ko'
+          ? '분석할 지역을 검색 결과에서 선택해 주세요.'
+          : 'Please select the region to analyze from the search results.'
+      );
+      setIsAnalyzing(false);
     }
   };
 
@@ -1287,10 +1341,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ placeId: candidate.placeId, language })
       });
-      if (!resolveRes.ok) {
-        throw new Error(language === 'ko' ? '여행지 상세 정보를 불러오지 못했습니다.' : 'Failed to retrieve place details.');
-      }
-      const resolveData = await resolveRes.json();
+      const resolveData = await parseJsonResponse<any>(resolveRes, '/app-api/places/resolve');
       if (resolveData.status !== 'resolved') {
         throw new Error(language === 'ko' ? '여행지 상세 정보를 불러오지 못했습니다.' : 'Failed to retrieve place details.');
       }
@@ -1325,6 +1376,19 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
     setDestAddress(address || '');
     setDestPlaceId(item.placeId);
     setDestLatLng({ lat: item.lat, lng: item.lng });
+
+    const searchItem: DestinationSearchItem = {
+      source: 'internal',
+      destinationId: item.placeId,
+      type: 'city',
+      displayName: dispName,
+      secondaryText: address || '',
+      names: { ko: item.nameKo, en: item.nameEn },
+      countryCode: item.placeId.startsWith('kr') ? 'KR' : item.placeId.startsWith('jp') ? 'JP' : 'FR',
+      location: { latitude: item.lat, longitude: item.lng }
+    };
+    setSelectedDestination(searchItem);
+
     setAmbiguousCandidates(null);
     setSearchResult(null);
     setSearchError(null);
@@ -1332,8 +1396,20 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
   };
 
   const handleAddToPlan = () => {
-    if (onSelectDestination && searchResult) {
-      onSelectDestination(destName, startDate, endDate);
+    if (isAddingToPlan) return;
+    if (onSelectDestination && (searchResult || destName)) {
+      setIsAddingToPlan(true);
+      const canonicalContext = {
+        placeId: selectedDestination?.id || searchResult?.placeId || destPlaceId,
+        countryCode: selectedDestination?.countryCode || searchResult?.countryCode,
+        countryName: selectedDestination?.countryName,
+        timezoneId: selectedDestination?.timezoneId,
+        city: selectedDestination?.city
+      };
+      onSelectDestination(destName, startDate, endDate, canonicalContext);
+      setTimeout(() => {
+        setIsAddingToPlan(false);
+      }, 2000);
     }
   };
 
@@ -1381,17 +1457,18 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
             value={destName}
             address={destAddress}
             placeId={destPlaceId}
-            onChange={(name, addr, latLng, pId) => {
+            onChange={(name, addr, latLng, pId, item) => {
               setDestName(name);
               setDestAddress(addr || '');
               setDestLatLng(latLng);
               setDestPlaceId(pId || '');
+              setSelectedDestination(item || null);
               setAmbiguousCandidates(null);
               setSearchResult(null);
               setSearchError(null);
               setValidationErrors(prev => ({ ...prev, destName: false }));
             }}
-            placeholder={language === 'ko' ? '방문할 도시, 국가 또는 지역 (예: 도쿄, 파리)' : 'City, region, or country (e.g. Tokyo, Paris)'}
+            placeholder={language === 'ko' ? '방문 도시, 지역 또는 섬 입력 (예: 전주, 도쿄, 제주도, 보라카이)' : 'Search city, island or region (e.g. Jeonju, Tokyo, Boracay)'}
             language={language}
           />
           {ambiguousCandidates && (
@@ -1461,77 +1538,120 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
         </div>
 
         {/* Popular chips section */}
-        <div className="space-y-1.5 pt-1">
-          <span className="text-[10px] font-bold text-gray-400 dark:text-stone-500 block uppercase tracking-wider">
-            {txt.popular_suggestions}
-          </span>
-          <div className="flex gap-1.5 flex-wrap">
-            {POPULAR_PLACES.map((item) => {
-              const label = language === 'ko' ? item.nameKo.split(',')[0] : item.nameEn.split(',')[0];
-              const isSelected = destPlaceId === item.placeId || destName === (language === 'ko' ? item.nameKo : item.nameEn);
-              return (
-                <button
-                  type="button"
-                  key={item.placeId}
-                  onClick={() => handleSelectPopular(item)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer ${
-                    isSelected
-                      ? 'bg-blue-600 text-white border-blue-600 shadow-sm shadow-blue-500/10'
-                      : 'bg-gray-50 dark:bg-[#181724] hover:bg-gray-100 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-300 border-gray-200 dark:border-zinc-700/60'
-                  }`}
-                >
-                  {label}
-                </button>
-              );
-            })}
+        {destName.trim().length === 0 && (
+          <div className="space-y-1.5 pt-1">
+            <span className="text-[10px] font-bold text-gray-400 dark:text-stone-500 block uppercase tracking-wider">
+              {txt.popular_suggestions}
+            </span>
+            <div className="flex gap-1.5 flex-wrap">
+              {POPULAR_PLACES.map((item) => {
+                const label = language === 'ko' ? item.nameKo.split(',')[0] : item.nameEn.split(',')[0];
+                const isSelected = destPlaceId === item.placeId || destName === (language === 'ko' ? item.nameKo : item.nameEn);
+                return (
+                  <button
+                    type="button"
+                    key={item.placeId}
+                    onClick={() => handleSelectPopular(item)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-sm shadow-blue-500/10'
+                        : 'bg-gray-50 dark:bg-[#181724] hover:bg-gray-100 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-300 border-gray-200 dark:border-zinc-700/60'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Analyze/Search Trigger CTA button */}
-        <button
-          type="button"
-          onClick={() => handleSearch(false)}
-          disabled={isAnalyzing}
-          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-bold text-xs py-3.5 rounded-xl shadow-md shadow-blue-500/10 flex items-center justify-center gap-2 active:scale-[0.99] transition-all cursor-pointer mt-2"
-        >
-          {isAnalyzing ? (
-            <>
-              <Loader2 size={13} className="animate-spin" />
-              <span className="font-extrabold">
-                {(() => {
-                  if (language === 'ko') {
-                    switch (analysisStage) {
-                      case 'resolving_destination':
-                        return '여행지 위치 분석 중...';
-                      case 'fetching_data':
-                        return '실시간 날씨 & 공휴일 조회 중...';
-                      case 'generating_summary':
-                        return 'AI 로컬 분석 보고서 생성 중...';
-                      default:
-                        return txt.searching_btn;
-                    }
-                  } else {
-                    switch (analysisStage) {
-                      case 'resolving_destination':
-                        return 'Analyzing location...';
-                      case 'fetching_data':
-                        return 'Retrieving weather & holidays...';
-                      case 'generating_summary':
-                        return 'Generating AI local report...';
-                      default:
-                        return txt.searching_btn;
-                    }
-                  }
-                })()}
-              </span>
-            </>
-          ) : (
-            <>
-              <Search size={13} />
-              <span className="font-extrabold">{txt.search_btn}</span>
-            </>
-          )}
-        </button>
+        {(() => {
+          const isResolving = selectedDestination?.isResolving;
+          const isResolveError = selectedDestination?.isResolveError;
+          const isDisabled = isAnalyzing || !selectedDestination || isResolving;
+
+          let btnText = '';
+          if (isAnalyzing) {
+            if (language === 'ko') {
+              switch (analysisStage) {
+                case 'resolving_destination':
+                  btnText = '여행지 위치 분석 중...';
+                  break;
+                case 'fetching_data':
+                  btnText = '실시간 날씨 & 공휴일 조회 중...';
+                  break;
+                case 'generating_summary':
+                  btnText = 'AI 로컬 분석 보고서 생성 중...';
+                  break;
+                default:
+                  btnText = txt.searching_btn;
+                  break;
+              }
+            } else {
+              switch (analysisStage) {
+                case 'resolving_destination':
+                  btnText = 'Analyzing location...';
+                  break;
+                case 'fetching_data':
+                  btnText = 'Retrieving weather & holidays...';
+                  break;
+                case 'generating_summary':
+                  btnText = 'Generating AI local report...';
+                  break;
+                default:
+                  btnText = txt.searching_btn;
+                  break;
+              }
+            }
+          } else if (isResolving) {
+            btnText = language === 'ko' ? '여행 정보를 준비하고 있어요...' : 'Preparing travel information...';
+          } else if (isResolveError) {
+            btnText = language === 'ko' ? '위치 정보를 가져오지 못했습니다. 다시 선택해 주세요' : 'Failed to resolve location. Please select again';
+          } else if (selectedDestination) {
+            btnText = txt.search_btn;
+          } else {
+            btnText = language === 'ko' ? '목적지를 검색 결과에서 선택해 주세요' : 'Please select a destination from search results';
+          }
+
+          return (
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                if (isDisabled) return;
+                e.preventDefault();
+                handleSearch(false);
+              }}
+              onClick={(e) => {
+                // For keyboard support (Enter/Space) where pointerDown doesn't fire
+                if (e.nativeEvent.pointerType === '') {
+                  handleSearch(false);
+                }
+              }}
+              disabled={isDisabled}
+              className={`w-full font-bold text-xs py-3.5 rounded-xl shadow-md flex items-center justify-center gap-2 active:scale-[0.99] transition-all cursor-pointer mt-2 ${
+                isResolveError
+                  ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/10'
+                  : isResolving
+                  ? 'bg-blue-100 dark:bg-zinc-800 text-blue-500 dark:text-zinc-400 cursor-wait shadow-none'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white disabled:bg-gray-200 dark:disabled:bg-zinc-800 disabled:text-gray-400 dark:disabled:text-zinc-500 disabled:cursor-not-allowed shadow-blue-500/10'
+              }`}
+            >
+              {isAnalyzing || isResolving ? (
+                <>
+                  <Loader2 size={13} className="animate-spin" />
+                  <span className="font-extrabold">{btnText}</span>
+                </>
+              ) : (
+                <>
+                  <Search size={13} />
+                  <span className="font-extrabold">{btnText}</span>
+                </>
+              )}
+            </button>
+          );
+        })()}
       </div>
 
 
@@ -1559,134 +1679,329 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
             exit={{ opacity: 0, y: -10 }}
             className="space-y-6"
           >
-            {/* 1. Header Card: Score & AI Narrative Summary */}
-            <div className="bg-white dark:bg-surface-primary rounded-2xl border border-gray-100 dark:border-subtle-border p-5 shadow-[0_4px_24px_rgba(0,0,0,0.02)] space-y-4">
-              
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-4 border-b border-gray-50 dark:border-[#222030]">
-                <div className="text-left space-y-1">
-                  <span className="inline-flex items-center px-2 py-0.5 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 text-[10px] font-extrabold rounded-md uppercase tracking-wider">
-                    {language === 'ko' ? '실시간 로컬 분석 보고서' : 'Live Destination Insights'}
-                  </span>
-                  <h2 className="font-extrabold text-base text-gray-900 dark:text-white truncate">
-                    {destName}
-                  </h2>
-                  <p className="text-[11px] text-gray-400 dark:text-stone-500 font-semibold flex items-center gap-1.5">
-                    <Calendar size={12} />
-                    {formatDisplayShort(startDate, language)} ~ {formatDisplayShort(endDate, language)} ({Math.max(1, Math.round((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)))}일간)
-                  </p>
-                </div>
-
-                {/* Score Circular Indicator */}
-                <div className={`p-3 rounded-xl border flex items-center gap-3 w-fit shrink-0 ${getScoreColor(searchResult.recommendationScore).bg}`}>
-                  <div className="relative w-10 h-10 shrink-0">
-                    <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36">
-                      <path
-                        className="text-gray-200 dark:text-[#2c2a3e]"
-                        strokeWidth="3.5"
-                        stroke="currentColor"
-                        fill="none"
-                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                      />
-                      <path
-                        className={`${getScoreColor(searchResult.recommendationScore).text}`}
-                        strokeWidth="3.5"
-                        strokeDasharray={`${searchResult.recommendationScore}, 100`}
-                        strokeLinecap="round"
-                        stroke="currentColor"
-                        fill="none"
-                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                      />
-                    </svg>
-                    <div className="absolute inset-0 flex items-center justify-center text-[11px] font-black font-sans text-gray-900 dark:text-white">
-                      {searchResult.recommendationScore}
-                    </div>
-                  </div>
-                  <div className="text-left shrink-0">
-                    <div className="text-[10px] font-bold text-gray-400 dark:text-stone-500 uppercase tracking-wide">
-                      {txt.recommendation_score}
-                    </div>
-                    <div className={`text-xs font-extrabold ${getScoreColor(searchResult.recommendationScore).text}`}>
-                      {searchResult.recommendationScore >= 80 ? (language === 'ko' ? '매우 추천' : 'Excellent') : searchResult.recommendationScore >= 60 ? (language === 'ko' ? '여행 보통' : 'Good') : (language === 'ko' ? '여정 주의' : 'Caution')}
-                    </div>
+            {searchResult?.status === 'partial' && (
+              <motion.div
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/30 text-amber-800 dark:text-amber-300 rounded-2xl text-xs flex flex-col gap-2.5"
+              >
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle size={16} className="shrink-0 mt-0.5 text-amber-500" />
+                  <div className="text-left leading-relaxed">
+                    <p className="font-bold">
+                      {language === 'ko' ? '일부 정보 제한적 수집됨 (Degraded Mode)' : 'Some Data Sources Unavailable (Degraded Mode)'}
+                    </p>
+                    <p className="font-normal mt-0.5 text-amber-700/90 dark:text-amber-400/90">
+                      {language === 'ko'
+                        ? '일시적인 네트워크 또는 쿼터 제한으로 인해 아래 정보를 최신 상태로 가져오지 못했습니다. 평년 기후 또는 기본 로컬 아카이브 데이터로 대체하여 분석을 제공합니다.'
+                        : 'Due to temporary network or quota limits, the following information could not be retrieved. The report was safely generated using historical averages or default local archives.'}
+                    </p>
                   </div>
                 </div>
-              </div>
-
-              {/* AI Comprehensive Narrative / Suitability Report */}
-              <div className="p-4 bg-gray-50/50 dark:bg-[#1a1926] rounded-xl border border-gray-100/50 dark:border-[#201e30] space-y-3">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <span className="inline-block px-2 py-0.5 bg-indigo-100/80 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-extrabold text-[10px] rounded uppercase tracking-wider">
-                    {language === 'ko' ? "추천 지수 및 데이터 기반 여행 적합성 보고서" : "Data-Driven Travel Suitability Report"}
-                  </span>
-                  {searchResult?.report?.recommendationIndex && (
-                    <span className="text-[11px] font-black text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded-full border border-indigo-200/60 dark:border-indigo-900/40">
-                      {language === 'ko' 
-                        ? `추천지수 ${searchResult.report.recommendationIndex.score}점 (${searchResult.report.recommendationIndex.gradeLabelKo})`
-                        : `Index ${searchResult.report.recommendationIndex.score} (${searchResult.report.recommendationIndex.gradeLabelEn})`}
-                    </span>
-                  )}
-                </div>
-
-                {searchResult?.report ? (
-                  <div className="space-y-3 text-left">
-                    {/* Paragraph 1: Conclusion */}
-                    {searchResult.report.paragraph1_conclusion && (
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-extrabold text-gray-900 dark:text-white flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
-                          <span>{language === 'ko' ? searchResult.report.paragraph1_conclusion.titleKo : searchResult.report.paragraph1_conclusion.titleEn}</span>
+                {searchResult.sources && (
+                  <div className="mt-2 pl-6 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                    {Object.entries(searchResult.sources).map(([key, source]: [string, any]) => {
+                      if (source.status === 'success') return null;
+                      const sourceName = key === 'weather' ? (language === 'ko' ? '날씨 예보' : 'Weather Forecast') :
+                                         key === 'holidays' ? (language === 'ko' ? '공휴일 정보' : 'Public Holidays') :
+                                         key === 'events' ? (language === 'ko' ? '로컬 이벤트' : 'Local Events') : key;
+                      const reason = source.reasonCode === 'API_QUOTA_OR_NETWORK' ? (language === 'ko' ? 'API 쿼터 또는 네트워크 초과' : 'API quota or network limit') :
+                                     source.reasonCode === 'UNAVAILABLE_OR_TIMEOUT' ? (language === 'ko' ? '제공사 응답 지연/불가' : 'Provider timeout or unavailable') : source.reasonCode;
+                      return (
+                        <div key={key} className="flex items-center gap-1.5 p-1.5 bg-amber-100/50 dark:bg-amber-900/30 rounded-md">
+                          <span className="font-medium text-amber-900 dark:text-amber-200">{sourceName}</span>
+                          <span className="text-amber-700 dark:text-amber-400 opacity-70">|</span>
+                          <span className="text-amber-700 dark:text-amber-400">{reason}</span>
                         </div>
-                        <p className="text-xs leading-relaxed text-gray-700 dark:text-zinc-300 break-keep pl-3 border-l-2 border-indigo-200 dark:border-indigo-900/40">
-                          {language === 'ko' ? searchResult.report.paragraph1_conclusion.contentKo : searchResult.report.paragraph1_conclusion.contentEn}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Paragraph 2: Positive Factors */}
-                    {searchResult.report.paragraph2_positiveFactors && (
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-extrabold text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                          <span>{language === 'ko' ? searchResult.report.paragraph2_positiveFactors.titleKo : searchResult.report.paragraph2_positiveFactors.titleEn}</span>
-                        </div>
-                        <p className="text-xs leading-relaxed text-gray-700 dark:text-zinc-300 break-keep pl-3 border-l-2 border-emerald-200 dark:border-emerald-900/40">
-                          {language === 'ko' ? searchResult.report.paragraph2_positiveFactors.contentKo : searchResult.report.paragraph2_positiveFactors.contentEn}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Paragraph 3: Negative Factors */}
-                    {searchResult.report.paragraph3_negativeFactors && (
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-extrabold text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                          <span>{language === 'ko' ? searchResult.report.paragraph3_negativeFactors.titleKo : searchResult.report.paragraph3_negativeFactors.titleEn}</span>
-                        </div>
-                        <p className="text-xs leading-relaxed text-gray-700 dark:text-zinc-300 break-keep pl-3 border-l-2 border-amber-200 dark:border-amber-900/40">
-                          {language === 'ko' ? searchResult.report.paragraph3_negativeFactors.contentKo : searchResult.report.paragraph3_negativeFactors.contentEn}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Paragraph 4: Travel Strategy */}
-                    {searchResult.report.paragraph4_travelStrategy && (
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-extrabold text-blue-700 dark:text-blue-400 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-                          <span>{language === 'ko' ? searchResult.report.paragraph4_travelStrategy.titleKo : searchResult.report.paragraph4_travelStrategy.titleEn}</span>
-                        </div>
-                        <p className="text-xs leading-relaxed text-gray-700 dark:text-zinc-300 break-keep pl-3 border-l-2 border-blue-200 dark:border-blue-900/40">
-                          {language === 'ko' ? searchResult.report.paragraph4_travelStrategy.contentKo : searchResult.report.paragraph4_travelStrategy.contentEn}
-                        </p>
-                      </div>
-                    )}
+                      );
+                    })}
                   </div>
-                ) : (
-                  <p className="text-xs leading-relaxed text-left font-sans text-gray-700 dark:text-zinc-300 break-keep">
-                    {language === 'ko' ? searchResult.summary : (searchResult.summaryEn || searchResult.summary)}
-                  </p>
                 )}
-              </div>
+              </motion.div>
+            )}
+
+            {/* 1. Header Card: 4-Level Travel Suitability & Report */}
+            <div className="bg-white dark:bg-surface-primary rounded-2xl border border-gray-100 dark:border-subtle-border p-5 shadow-[0_4px_24px_rgba(0,0,0,0.02)] space-y-4">
+              {(() => {
+                // 1. Normalize Travel Suitability Data
+                const rawScore = typeof searchResult?.recommendationScore === 'number' ? searchResult.recommendationScore : 70;
+                const suitability = normalizeTravelSuitability({
+                  internalScore: rawScore,
+                  confidence: searchResult?.evidenceBundle?.confidence || searchResult?.report?.footerMetadata?.confidence || 'high',
+                  subScores: searchResult?.evidenceBundle?.recommendationIndex?.subScores || searchResult?.report?.evidenceBundle?.recommendationIndex?.subScores,
+                  positiveFactors: (searchResult?.evidenceBundle?.positiveContributors || searchResult?.report?.evidenceBundle?.positiveContributors || []).map((p: any) => ({
+                    id: p.id,
+                    type: p.type,
+                    titleKo: p.labelKo,
+                    titleEn: p.labelEn,
+                    descriptionKo: p.labelKo,
+                    descriptionEn: p.labelEn,
+                    evidenceIds: p.evidenceIds || []
+                  })),
+                  cautionFactors: (searchResult?.evidenceBundle?.negativeContributors || searchResult?.report?.evidenceBundle?.negativeContributors || []).map((n: any) => ({
+                    id: n.id,
+                    type: n.type,
+                    titleKo: n.labelKo,
+                    titleEn: n.labelEn,
+                    descriptionKo: n.labelKo,
+                    descriptionEn: n.labelEn,
+                    evidenceIds: n.evidenceIds || []
+                  })),
+                  criticalWarnings: (searchResult?.evidenceBundle?.criticalRisks || searchResult?.report?.criticalRisks || []).map((r: any, idx: number) => ({
+                    id: `crit-${idx}`,
+                    type: r.type || 'extreme_weather',
+                    severity: 'critical',
+                    titleKo: r.labelKo || r.titleKo || (language === 'ko' ? '기상/안전 경보' : 'Alert/Advisory'),
+                    titleEn: r.labelEn || r.titleEn || 'Alert/Advisory',
+                    descriptionKo: r.descriptionKo || r.labelKo || '사전 확인 및 주의가 필요합니다.',
+                    descriptionEn: r.descriptionEn || r.labelEn || 'Caution is advised.',
+                    evidenceIds: []
+                  }))
+                });
+
+                const suitabilityConfig = TRAVEL_SUITABILITY_CONFIG[suitability.level];
+                const { durationDays, durationNights } = calculateTripDuration(startDate, endDate);
+
+                // DEV Mode Debug Logging (Section 18)
+                if (import.meta.env.DEV) {
+                  console.log('[TRAVEL_SUITABILITY_DEBUG]', {
+                    internalScore: suitability.internalScore,
+                    level: suitability.level,
+                    labelKo: suitabilityConfig.labelKo,
+                    labelEn: suitabilityConfig.labelEn,
+                    subScores: suitability.subScores,
+                    confidence: suitability.confidence,
+                    positiveFactorsCount: suitability.positiveFactors.length,
+                    cautionFactorsCount: suitability.cautionFactors.length,
+                    criticalWarningsCount: suitability.criticalWarnings.length
+                  });
+                }
+
+                return (
+                  <div className="space-y-4">
+                    {/* Destination Header & Suitability Badge Card */}
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-4 border-b border-gray-100 dark:border-[#222030]">
+                      <div className="text-left space-y-1">
+                        <span className="inline-flex items-center px-2 py-0.5 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 text-[10px] font-extrabold rounded-md uppercase tracking-wider">
+                          {language === 'ko' ? '실시간 로컬 분석 보고서' : 'Live Destination Insights'}
+                        </span>
+                        <h2 className="font-extrabold text-lg text-gray-900 dark:text-white truncate">
+                          {destName}
+                        </h2>
+                        <p className="text-[11px] text-gray-400 dark:text-stone-500 font-semibold flex items-center gap-1.5">
+                          <Calendar size={12} />
+                          {formatDisplayShort(startDate, language)} ~ {formatDisplayShort(endDate, language)} ({language === 'ko' ? `${durationNights > 0 ? `${durationNights}박 ` : ''}${durationDays}일간` : `${durationDays} Days / ${durationNights} Nights`})
+                        </p>
+                      </div>
+
+                      {/* 4-Level Suitability Status Badge (NO numeric score, NO circular gauge) */}
+                      <div className={`p-3.5 rounded-xl border flex items-center gap-3 w-fit shrink-0 ${suitabilityConfig.badgeBgClass} ${suitabilityConfig.badgeBorderClass}`}>
+                        <span
+                          role="img"
+                          aria-label={language === 'ko' ? suitabilityConfig.ariaLabelKo : suitabilityConfig.ariaLabelEn}
+                          aria-hidden="false"
+                          className="text-3xl shrink-0"
+                        >
+                          {suitabilityConfig.emoji}
+                        </span>
+                        <div className="text-left shrink-0">
+                          <div className="text-[10px] font-bold text-gray-400 dark:text-stone-500 uppercase tracking-wide">
+                            {language === 'ko' ? '여행 적합성' : 'Travel Suitability'}
+                          </div>
+                          <div className={`text-sm font-black ${suitabilityConfig.badgeTextClass}`}>
+                            {language === 'ko' ? suitabilityConfig.labelKo : suitabilityConfig.labelEn}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 1-Line Status Summary */}
+                    <div className={`p-3 rounded-xl border text-xs font-semibold leading-relaxed text-left ${suitabilityConfig.badgeBgClass} ${suitabilityConfig.badgeBorderClass} ${suitabilityConfig.badgeTextClass}`}>
+                      {language === 'ko' ? suitabilityConfig.shortSummaryKo : suitabilityConfig.shortSummaryEn}
+                    </div>
+
+                    {/* Critical Risk / Warning Banner (If Present) */}
+                    {suitability.criticalWarnings.length > 0 && (
+                      <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/50 rounded-xl p-3.5 space-y-2 text-left">
+                        <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300 font-extrabold text-xs">
+                          <AlertTriangle size={15} className="shrink-0 text-amber-600 dark:text-amber-400" />
+                          <span>{txt.critical_warning_alert}</span>
+                        </div>
+                        <div className="space-y-1 pl-5">
+                          {suitability.criticalWarnings.map((warn, idx) => (
+                            <p key={idx} className="text-xs text-amber-900 dark:text-amber-200 font-medium leading-relaxed">
+                              • <span className="font-bold">{language === 'ko' ? warn.titleKo : warn.titleEn}</span>: {language === 'ko' ? warn.descriptionKo : warn.descriptionEn}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Analysis Conclusion & Highlights Report */}
+                    <div className="p-4 bg-gray-50/80 dark:bg-[#1a1926] rounded-xl border border-gray-100 dark:border-[#201e30] space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-block px-2 py-0.5 bg-indigo-100/80 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-extrabold text-[10px] rounded uppercase tracking-wider">
+                          {language === 'ko' ? "종합 분석 보고서" : "Live Travel Suitability Report"}
+                        </span>
+                      </div>
+
+                      <div className="space-y-2.5 text-left">
+                        {/* 1. Overall Conclusion */}
+                        <div className="space-y-1 bg-white/80 dark:bg-black/30 p-3 rounded-lg border border-gray-100 dark:border-gray-800/50">
+                          <div className="text-[11px] font-extrabold text-indigo-900 dark:text-indigo-200 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                            <span>{language === 'ko' ? "1. 종합 결론" : "1. Overall Conclusion"}</span>
+                          </div>
+                          <p className="text-xs leading-relaxed text-gray-800 dark:text-zinc-200 break-keep pl-3 border-l-2 border-indigo-500/40 font-medium">
+                            {language === 'ko'
+                              ? (searchResult?.report?.overallConclusion || suitabilityConfig.shortSummaryKo)
+                              : (searchResult?.report?.overallConclusionEn || suitabilityConfig.shortSummaryEn)}
+                          </p>
+                        </div>
+
+                        {/* 2. Positive Highlights ("좋은 점") (Max 2) */}
+                        <div className="space-y-1.5 bg-emerald-50/40 dark:bg-emerald-950/20 p-3 rounded-lg border border-emerald-100/60 dark:border-emerald-900/30">
+                          <div className="text-[11px] font-extrabold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                            <span>{txt.positive_factors_title}</span>
+                          </div>
+                          <div className="space-y-1 pl-3 border-l-2 border-emerald-500/40">
+                            {(suitability.positiveFactors.length > 0 ? suitability.positiveFactors.slice(0, 2) : (searchResult?.report?.positiveHighlights || []).slice(0, 2)).map((item: any, idx: number) => {
+                              const textVal = language === 'ko' ? (item.titleKo || item.text) : (item.titleEn || item.textEn || item.text);
+                              const cleanText = String(textVal || '').replace(/^[•·\-⚫⚪🔘🔵🟢🟡🔴▶▪▫\s]+/, '');
+                              return (
+                                <p key={idx} className="text-xs leading-relaxed text-gray-800 dark:text-zinc-200 break-keep font-medium">
+                                  • {cleanText}
+                                </p>
+                              );
+                            })}
+                            {suitability.positiveFactors.length === 0 && (!searchResult?.report?.positiveHighlights || searchResult.report.positiveHighlights.length === 0) && (
+                              <p className="text-xs leading-relaxed text-gray-500 dark:text-stone-400 font-medium">
+                                {language === 'ko' ? '선택하신 여행 기간에는 특별한 지수 상승 혜택 요인이 제한적입니다.' : 'Limited major positive score boosters for this period.'}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 3. Caution Points ("확인할 점") (Max 2) */}
+                        <div className="space-y-1.5 bg-amber-50/40 dark:bg-amber-950/20 p-3 rounded-lg border border-amber-100/60 dark:border-amber-900/30">
+                          <div className="text-[11px] font-extrabold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                            <span>{txt.caution_factors_title}</span>
+                          </div>
+                          <div className="space-y-1 pl-3 border-l-2 border-amber-500/40">
+                            {(suitability.cautionFactors.length > 0 ? suitability.cautionFactors.slice(0, 2) : (searchResult?.report?.cautionPoints || []).slice(0, 2)).map((item: any, idx: number) => {
+                              const textVal = language === 'ko' ? (item.titleKo || item.text) : (item.titleEn || item.textEn || item.text);
+                              const cleanText = String(textVal || '').replace(/^[•·\-⚫⚪🔘🔵🟢🟡🔴▶▪▫\s]+/, '');
+                              return (
+                                <p key={idx} className="text-xs leading-relaxed text-gray-800 dark:text-zinc-200 break-keep font-medium">
+                                  • {cleanText}
+                                </p>
+                              );
+                            })}
+                            {suitability.cautionFactors.length === 0 && (!searchResult?.report?.cautionPoints || searchResult.report.cautionPoints.length === 0) && (
+                              <p className="text-xs leading-relaxed text-gray-500 dark:text-stone-400 font-medium">
+                                {language === 'ko' ? '특별한 주의사항이 보고되지 않았습니다.' : 'No special caution points reported.'}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 4. Actionable Strategy */}
+                        {searchResult?.report?.actionableStrategy && (
+                          <div className="space-y-1 bg-blue-50/40 dark:bg-blue-950/20 p-3 rounded-lg border border-blue-100/60 dark:border-blue-900/30">
+                            <div className="text-[11px] font-extrabold text-blue-800 dark:text-blue-300 flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                              <span>{language === 'ko' ? "추천 여행 전략" : "Recommended Travel Strategy"}</span>
+                            </div>
+                            <p className="text-xs leading-relaxed text-gray-800 dark:text-zinc-200 break-keep pl-3 border-l-2 border-blue-500/40 font-medium">
+                              {language === 'ko' ? searchResult.report.actionableStrategy : (searchResult.report.actionableStrategyEn || searchResult.report.actionableStrategy)}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Collapsible Analysis Details Accordion (Section 12 & 11) */}
+                    <div className="space-y-2">
+                      <button
+                        onClick={() => setShowAnalysisDetails(!showAnalysisDetails)}
+                        className="w-full flex items-center justify-between py-2.5 px-3.5 bg-gray-50 dark:bg-surface-secondary hover:bg-gray-100 dark:hover:bg-[#252336] rounded-xl text-xs font-bold text-gray-700 dark:text-gray-300 transition-colors border border-gray-100 dark:border-subtle-border"
+                        aria-expanded={showAnalysisDetails}
+                      >
+                        <span className="flex items-center gap-2">
+                          <BarChart3 size={15} className="text-indigo-500" />
+                          <span>{showAnalysisDetails ? txt.hide_analysis_details : txt.view_analysis_details}</span>
+                        </span>
+                        <ChevronDown size={15} className={`transform transition-transform ${showAnalysisDetails ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      {showAnalysisDetails && (
+                        <div className="p-4 bg-gray-50/70 dark:bg-surface-secondary/60 rounded-xl border border-gray-100 dark:border-subtle-border space-y-3.5 text-left text-xs animate-fadeIn">
+                          <div className="flex items-center justify-between border-b border-gray-200/60 dark:border-gray-800 pb-2">
+                            <span className="font-extrabold text-gray-900 dark:text-white flex items-center gap-1.5">
+                              <span>📊</span> {txt.category_breakdown}
+                            </span>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400">
+                              {suitability.confidence === 'high' ? txt.confidence_high : (suitability.confidence === 'medium' ? txt.confidence_medium : txt.confidence_low)}
+                            </span>
+                          </div>
+
+                          {/* Subscores List (Qualitative Labels with clear descriptions) */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            {[
+                              { 
+                                label: txt.weather_comfort, 
+                                score: suitability.subScores.weatherComfort,
+                                desc: language === 'ko' ? '기온·습도·강수 등 체감 날씨 조건' : 'Temperature, humidity & rain conditions'
+                              },
+                              { 
+                                label: txt.local_experience, 
+                                score: suitability.subScores.localExperience,
+                                desc: language === 'ko' ? '현지 축제·이벤트·볼거리 풍부함' : 'Local festivals, events & attractions'
+                              },
+                              { 
+                                label: txt.crowd_impact, 
+                                score: suitability.subScores.crowdAndHolidayImpact,
+                                desc: language === 'ko' ? '주요 명소 관광객 밀집 및 공휴일 여파' : 'Tourist crowds & public holiday impact'
+                              },
+                              { 
+                                label: txt.itinerary_practicality, 
+                                score: suitability.subScores.itineraryPracticality,
+                                desc: language === 'ko' ? '야외 관광 및 도보 이동 소화 수월성' : 'Ease of outdoor activities & transit'
+                              },
+                              { 
+                                label: txt.operational_stability, 
+                                score: suitability.subScores.operationalStability,
+                                desc: language === 'ko' ? '관광 명소 정상 개장 및 기상 안전성' : 'Normal attraction openings & weather safety'
+                              }
+                            ].map((item, idx) => {
+                              const status = getSubScoreStatus(item.score);
+                              return (
+                                <div key={idx} className="flex flex-col gap-1 p-2.5 rounded-lg bg-white dark:bg-surface-primary border border-gray-100 dark:border-subtle-border">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-900 dark:text-white font-semibold text-[13px]">{item.label}</span>
+                                    <span className={`font-bold px-2 py-0.5 rounded text-[11px] ${status.bg} ${status.text}`}>
+                                      {language === 'ko' ? status.labelKo : status.labelEn}
+                                    </span>
+                                  </div>
+                                  <span className="text-[10px] text-gray-500 dark:text-stone-400 font-normal leading-tight">{item.desc}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          <p className="text-[11px] text-gray-400 dark:text-stone-500 italic">
+                            {language === 'ko'
+                              ? '* 세부 항목은 기상 예보, 공휴일, 행사 정보 등을 바탕으로 종합 평가되었습니다.'
+                              : '* Categories are evaluated based on live weather, public holidays, and event data.'}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* 2. Representative Festivals & Events section */}
@@ -1884,7 +2199,7 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
                         <div className="space-y-2">
                           {holidayItems.map((hol: any, idx: number) => (
                             <div
-                              key={hol.id || idx}
+                              key={hol.id ? `${hol.id}-${idx}` : `hol-${idx}`}
                               className="p-3 bg-gray-50 dark:bg-[#161521] border border-gray-100 dark:border-subtle-border rounded-xl flex justify-between items-center gap-4 text-xs font-bold"
                             >
                               <div className="flex items-center gap-2.5 min-w-0">
@@ -2687,26 +3002,65 @@ export default function ExploreTab({ onSelectDestination, language = 'ko', isDar
               </div>
             </div>
 
-            {/* 5. CTA and Refresh trigger */}
-            <div className="bg-white dark:bg-surface-primary rounded-2xl border border-gray-100 dark:border-subtle-border p-5 shadow-[0_4px_24px_rgba(0,0,0,0.02)] flex flex-col sm:flex-row gap-3">
-              <button
-                type="button"
-                onClick={() => handleSearch(true)}
-                disabled={isAnalyzing}
-                className="flex-1 bg-gray-50 hover:bg-gray-100 dark:bg-[#181724] dark:hover:bg-zinc-800 border border-gray-200 dark:border-zinc-700/80 text-gray-600 dark:text-zinc-300 font-bold text-xs py-3 px-4 rounded-xl active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
-              >
-                <RefreshCw size={12} className={isAnalyzing ? "animate-spin" : ""} />
-                <span>{txt.force_refresh}</span>
-              </button>
-              
-              <button
-                type="button"
-                onClick={handleAddToPlan}
-                className="flex-[2] bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-3 px-4 rounded-xl shadow-md shadow-blue-500/15 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <span>{txt.add_to_plan}</span>
-                <ArrowRight size={13} />
-              </button>
+            {/* 5. CTA */}
+            <div className="bg-white dark:bg-surface-primary rounded-2xl border border-gray-100 dark:border-subtle-border p-5 shadow-[0_4px_24px_rgba(0,0,0,0.02)]">
+              {(() => {
+                const isCompareDates = Boolean(
+                  searchResult?.report?.suitabilityResult?.level === 'compare_dates' ||
+                  searchResult?.report?.ratingConfig?.key === 'caution' ||
+                  searchResult?.report?.ratingConfig?.key === 'reconsider' ||
+                  searchResult?.report?.ratingConfig?.key === 'notRecommended' ||
+                  searchResult?.report?.ratingConfig?.ctaKo?.includes('선택') ||
+                  searchResult?.report?.ratingConfig?.ctaKo?.includes('비교') ||
+                  searchResult?.report?.ratingConfig?.ctaKo?.includes('다시 찾기')
+                );
+
+                if (isCompareDates) {
+                  return (
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      <button
+                        type="button"
+                        disabled={isAddingToPlan}
+                        onClick={() => {
+                          openCalendarWithStep('start');
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="flex-1 bg-amber-500 hover:bg-amber-600 disabled:opacity-60 disabled:cursor-not-allowed text-white font-extrabold text-xs sm:text-sm py-3.5 px-4 rounded-xl shadow-md shadow-amber-500/15 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <Calendar size={16} />
+                        <span>
+                          {language === 'ko' ? txt.cta_compare_dates : 'Select Other Dates'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isAddingToPlan}
+                        onClick={handleAddToPlan}
+                        className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-extrabold text-xs sm:text-sm py-3.5 px-4 rounded-xl shadow-md shadow-blue-500/15 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <span>{txt.cta_continue_current}</span>
+                        <ArrowRight size={16} />
+                      </button>
+                    </div>
+                  );
+                }
+
+                return (
+                  <button
+                    type="button"
+                    disabled={isAddingToPlan}
+                    onClick={handleAddToPlan}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-extrabold text-xs sm:text-sm py-3.5 px-4 rounded-xl shadow-md shadow-blue-500/15 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <span>
+                      {searchResult?.report?.ratingConfig
+                        ? (language === 'ko' ? `${searchResult.report.ratingConfig.ctaKo} ✨` : `${searchResult.report.ratingConfig.ctaEn} ✨`)
+                        : txt.add_to_plan}
+                    </span>
+                    <ArrowRight size={16} />
+                  </button>
+                );
+              })()}
             </div>
 
           </motion.div>

@@ -32,13 +32,13 @@ export default function RecordEmptyState({ language }: RecordEmptyStateProps) {
         onPointerLeave={() => setIsPressed(false)}
         onPointerCancel={() => setIsPressed(false)}
       >
-        {/* Layer 2: Complete suitcase asset with subtle depth response */}
+        {/* Layer 2: Complete stamp asset with subtle depth response */}
         <motion.div 
           className="absolute z-10 w-[200px]"
           animate={{ scale: suitcaseScale, y: suitcaseY }}
           transition={{ type: "spring", stiffness: 400, damping: 28, duration: 0.23 }}
         >
-          <img src="/stamps/Suitcase.png" alt="Suitcase" className="w-full h-auto pointer-events-none" referrerPolicy="no-referrer" draggable="false" />
+          <img src="/stamps/Stamp.png" alt="Stamp" className="w-full h-auto pointer-events-none" referrerPolicy="no-referrer" draggable="false" onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }} />
         </motion.div>
 
         {/* Layer 3: Ticket silhouette shadow */}
@@ -53,10 +53,10 @@ export default function RecordEmptyState({ language }: RecordEmptyStateProps) {
           }}
           transition={{ type: "spring", stiffness: 400, damping: 28, duration: 0.23 }}
         >
-          <img src="/stamps/Boarding.png" alt="" className="w-full h-auto brightness-0 pointer-events-none" referrerPolicy="no-referrer" draggable="false" />
+          <img src="/stamps/Stamp1.png" alt="" className="w-full h-auto brightness-0 pointer-events-none" referrerPolicy="no-referrer" draggable="false" onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }} />
         </motion.div>
 
-        {/* Layer 4: Complete ticket asset */}
+        {/* Layer 4: Complete stamp asset */}
         <motion.div 
           className="absolute z-30 w-[160px] ml-16 mt-16 pointer-events-none"
           animate={{ 
@@ -66,7 +66,7 @@ export default function RecordEmptyState({ language }: RecordEmptyStateProps) {
           }}
           transition={{ type: "spring", stiffness: 400, damping: 28, duration: 0.23 }}
         >
-          <img src="/stamps/Boarding.png" alt="Ticket" className="w-full h-auto pointer-events-none" referrerPolicy="no-referrer" draggable="false" />
+          <img src="/stamps/Stamp1.png" alt="Stamp" className="w-full h-auto pointer-events-none" referrerPolicy="no-referrer" draggable="false" onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }} />
         </motion.div>
       </div>
 

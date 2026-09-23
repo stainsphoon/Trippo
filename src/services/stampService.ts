@@ -38,9 +38,9 @@ export const getDefaultStamps = async (): Promise<CustomStamp[]> => {
     createdAt: 0
   }));
   return [
-    { id: 'default-1', imageUrl: '/stamps/Sunglasses.png', createdAt: 0 },
-    { id: 'default-2', imageUrl: '/stamps/Suitcase.png', createdAt: 0 },
-    { id: 'default-3', imageUrl: '/stamps/Boarding.png', createdAt: 0 },
+    { id: 'default-1', imageUrl: '/stamps/Stamp.png', createdAt: 0 },
+    { id: 'default-2', imageUrl: '/stamps/Stamp1.png', createdAt: 0 },
+    { id: 'default-3', imageUrl: '/stamps/Stamp2.png', createdAt: 0 },
     ...Array.from({ length: 9 }, (_, i) => ({ id: `korea-${i + 1}`, imageUrl: `/stamps/Korea_${i + 1} 1.png`, createdAt: 0 })),
     ...japanStamps,
   ];

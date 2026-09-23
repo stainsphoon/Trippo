@@ -7,42 +7,576 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { getAppCheck } from "firebase-admin/app-check";
 import { initializeApp as initializeWebFirebaseApp } from "firebase/app";
-import { getFirestore as getWebFirestore, doc as webDoc, getDoc as webGetDoc, setDoc as webSetDoc } from "firebase/firestore";
+import { initializeFirestore as initializeWebFirestore, setLogLevel as setWebFirestoreLogLevel, doc as webDoc, getDoc as webGetDoc, setDoc as webSetDoc, getDocs as webGetDocs, collection as webCollection, query as webQuery, where as webWhere, limit as webLimit, runTransaction as webRunTransaction, deleteDoc as webDeleteDoc } from "firebase/firestore";
 import { DateTime } from "luxon";
 import crypto from "crypto";
+import { enqueueDestinationEnrichment, processQueue } from "./src/services/destinationLifecycleWorker.js";
 import { GoogleGenAI, Type } from "@google/genai";
 import { computeRecommendationIndexAndBundle, generateRuleBasedReport, generateAIReportWithGemini } from "./src/services/reportEngine";
+import { searchInternalDestinations, searchExternalDestinations, resolveDestinationDetails, upsertRuntimeDestination, deleteRuntimeDestination, googlePlaceIdMappingStore } from "./src/services/destinationSearchService";
+import { isDuplicateDestination, calculateDestinationSearchRank, normalizeSearchText } from "./src/utils/destinationSearchNormalization";
+import { groupAndDeduplicateDestinations } from "./src/utils/destinationGrouping.js";
+import { runGroupingVerificationSuite } from "./src/tests/destinationGroupingTest.js";
+import { runProviderMappingRecovery } from "./src/services/providerMappingRecovery.js";
 
 async function startServer() {
   const SERVER_STARTED_AT = new Date().toISOString();
   const app = express();
+  
   // Cloud Run requirement: use dynamic port configuration via process.env.PORT, default to 3000
-  const PORT = 3000;
+  const parsedPort = Number(process.env.PORT);
+  const PORT = Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
   
   // Set trust proxy to true for accurate client IP identification in reverse-proxy setups
   app.set("trust proxy", 1);
+
+  // Request ID middleware
+  app.use((req, res, next) => {
+    const requestId = req.headers['x-request-id']?.toString() || crypto.randomUUID();
+    res.setHeader('x-request-id', requestId);
+    (req as any).requestId = requestId;
+    next();
+  });
 
   // In-memory request tracker for rate-limiting
   const requestTimestamps = new Map<string, number[]>();
 
   app.use(express.json());
 
+  // API health endpoint for diagnostics
+  app.get('/app-api/health', (_req, res) => {
+    return res.status(200).json({
+      ok: true,
+      service: 'trippo-api',
+      buildId: 'trippo-build-2026-08-04-v3',
+      serverStartedAt: SERVER_STARTED_AT,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.get('/app-api/explore/diagnostics', (req, res) => {
+    // Production restriction: read-only + internal
+    const isProduction = process.env.NODE_ENV === 'production';
+    
+    // Do not allow state modification via GET request in any environment
+    const { injectFault, reset } = req.query;
+    if (injectFault || reset) {
+      return res.status(405).json({
+        error: "Method Not Allowed",
+        message: "State modification via GET is strictly prohibited. Use POST /app-api/explore/diagnostics/fault (Non-production only)."
+      });
+    }
+
+    return res.status(200).json({
+      service: 'trippo-api',
+      faultInjectionState,
+      circuitBreakers: {
+        destinationCore: {
+          state: destinationCoreBreaker.state,
+          recentResults: destinationCoreBreaker.recentResults
+        },
+        destinationSearchCache: {
+          state: destinationSearchCacheBreaker.state,
+          recentResults: destinationSearchCacheBreaker.recentResults
+        },
+        sharedPlan: {
+          state: sharedPlanBreaker.state,
+          recentResults: sharedPlanBreaker.recentResults
+        },
+        nonCritical: {
+          state: nonCriticalCircuitBreaker.state,
+          recentResults: nonCriticalCircuitBreaker.recentResults
+        }
+      },
+      metrics: firestoreMetrics,
+      latency: {
+        reads: {
+          p50: latencyTracker.getPercentile(latencyTracker.reads, 50),
+          p95: latencyTracker.getPercentile(latencyTracker.reads, 95),
+          count: latencyTracker.reads.length
+        },
+        writes: {
+          p50: latencyTracker.getPercentile(latencyTracker.writes, 50),
+          p95: latencyTracker.getPercentile(latencyTracker.writes, 95),
+          count: latencyTracker.writes.length
+        }
+      }
+    });
+  });
+
+  app.post('/app-api/explore/diagnostics/fault', (req, res) => {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: "Forbidden", message: "Fault injection is disabled in production." });
+    }
+
+    const { injectFault, reset } = req.body || {};
+    if (reset === true || reset === 'true') {
+      faultInjectionState = null;
+      destinationCoreBreaker.state = "CLOSED";
+      destinationCoreBreaker.recentResults = [];
+      destinationCoreBreaker.activeRequests = 0;
+      destinationSearchCacheBreaker.state = "CLOSED";
+      destinationSearchCacheBreaker.recentResults = [];
+      destinationSearchCacheBreaker.activeRequests = 0;
+      sharedPlanBreaker.state = "CLOSED";
+      sharedPlanBreaker.recentResults = [];
+      sharedPlanBreaker.activeRequests = 0;
+      nonCriticalCircuitBreaker.state = "CLOSED";
+      nonCriticalCircuitBreaker.recentResults = [];
+      nonCriticalCircuitBreaker.activeRequests = 0;
+      
+      firestoreMetrics.firestoreReadTimeoutCount = 0;
+      firestoreMetrics.firestoreWriteTimeoutCount = 0;
+      firestoreMetrics.firestoreUnexpectedNotFoundCount = 0;
+      firestoreMetrics.firestoreUnavailableCount = 0;
+      firestoreMetrics.firestoreFallbackToMemoryCount = 0;
+      firestoreMetrics.explorePartialResponseCount = 0;
+      firestoreMetrics.destinationIdentityUnavailableCount = 0;
+      firestoreMetrics.geminiClientAbortCount = 0;
+      firestoreMetrics.geminiTimeoutFallbackCount = 0;
+      firestoreMetrics.geminiLateResponseIgnoredCount = 0;
+      latencyTracker.reads = [];
+      latencyTracker.writes = [];
+      console.log("[Diagnostics] Fault injection and metrics reset complete.");
+    } else if (injectFault) {
+      faultInjectionState = String(injectFault);
+      console.warn(`[Diagnostics] Injected fault simulation state: ${faultInjectionState}`);
+    }
+
+    return res.status(200).json({ success: true, faultInjectionState });
+  });
+
   // Helper to ensure Firebase Admin is initialized securely
   let adminInitialized = false;
   let initError: any = null;
+
+  const firestoreMetrics = {
+    firestoreReadTimeoutCount: 0,
+    firestoreWriteTimeoutCount: 0,
+    firestoreUnexpectedNotFoundCount: 0,
+    firestoreUnavailableCount: 0,
+    firestoreFallbackToMemoryCount: 0,
+    explorePartialResponseCount: 0,
+    destinationIdentityUnavailableCount: 0,
+    geminiClientAbortCount: 0,
+    geminiTimeoutFallbackCount: 0,
+    geminiLateResponseIgnoredCount: 0
+  };
+
+  const latencyTracker = {
+    reads: [] as number[],
+    writes: [] as number[],
+    recordRead(ms: number) {
+      this.reads.push(ms);
+      if (this.reads.length > 100) this.reads.shift();
+      this.logMetrics();
+    },
+    recordWrite(ms: number) {
+      this.writes.push(ms);
+      if (this.writes.length > 100) this.writes.shift();
+      this.logMetrics();
+    },
+    getPercentile(arr: number[], percentile: number) {
+      if (arr.length === 0) return 0;
+      const sorted = [...arr].sort((a, b) => a - b);
+      const index = Math.ceil((percentile / 100) * sorted.length) - 1;
+      return sorted[Math.max(0, index)];
+    },
+    logMetrics() {
+      const readP50 = this.getPercentile(this.reads, 50);
+      const readP95 = this.getPercentile(this.reads, 95);
+      const writeP50 = this.getPercentile(this.writes, 50);
+      const writeP95 = this.getPercentile(this.writes, 95);
+      console.log(`[Firestore Latency Metrics] Reads (p50: ${readP50}ms, p95: ${readP95}ms, n=${this.reads.length}) | Writes (p50: ${writeP50}ms, p95: ${writeP95}ms, n=${this.writes.length})`);
+    }
+  };
+
+  let faultInjectionState: string | null = null;
+
+  function classifyFirestoreError(err: any, operation: string, collection: string, docPath: string) {
+    const errCode = err?.code;
+    const errMsg = err?.message || String(err);
+    const projectId = "gen-lang-client-0177221054";
+    const databaseId: string = "ai-studio-trippo-ff4554d0-30e6-46ce-9ce9-47e9504b809c";
+
+    let classification = "unknown";
+    let isTransient = false;
+
+    const codeStr = String(errCode || "").toLowerCase();
+    const msgStr = errMsg.toLowerCase();
+
+    const isNotFound = codeStr === "not-found" || errCode === 5 || msgStr.includes("not-found") || msgStr.includes("not found");
+    const isPermissionDenied = codeStr === "permission-denied" || errCode === 7 || msgStr.includes("permission");
+    const isUnauthenticated = codeStr === "unauthenticated" || errCode === 16 || msgStr.includes("unauthenticated") || msgStr.includes("auth");
+    const isInvalidArgument = codeStr === "invalid-argument" || errCode === 3 || msgStr.includes("invalid argument");
+    const isFailedPrecondition = codeStr === "failed-precondition" || errCode === 9 || msgStr.includes("failed precondition");
+    
+    const isDeadlineExceeded = codeStr === "deadline-exceeded" || errCode === 4 || msgStr.includes("timeout") || msgStr.includes("deadline exceeded");
+    const isUnavailable = codeStr === "unavailable" || errCode === 14 || msgStr.includes("unavailable");
+    const isInternal = codeStr === "internal" || errCode === 13 || msgStr.includes("internal");
+
+    if (isNotFound) {
+      if (msgStr.includes("database") || msgStr.includes("db")) {
+        classification = "database_not_found";
+      } else if (msgStr.includes("project")) {
+        classification = "wrong_project";
+      } else if (databaseId === "(default)" || databaseId === "default") {
+        classification = "wrong_database";
+      } else if (docPath.includes("//") || docPath.startsWith("/") || docPath.endsWith("/")) {
+        classification = "invalid_path";
+      } else {
+        const isExpectedCache = ["route_cache", "weatherCache", "destinationSearchCache", "destinationProviderMappings", "destinationSearchCache"].includes(collection);
+        if (isExpectedCache) {
+          classification = "expected_missing_document";
+        } else {
+          classification = "document_not_found";
+          firestoreMetrics.firestoreUnexpectedNotFoundCount++;
+        }
+      }
+    } else if (isPermissionDenied) {
+      classification = "permission_denied";
+    } else if (isUnauthenticated) {
+      classification = "unauthenticated";
+    } else if (isInvalidArgument) {
+      classification = "invalid_argument";
+    } else if (isFailedPrecondition) {
+      classification = "failed_precondition";
+    } else if (isDeadlineExceeded) {
+      classification = "deadline_exceeded";
+      isTransient = true;
+      if (operation === "write") {
+        firestoreMetrics.firestoreWriteTimeoutCount++;
+      } else {
+        firestoreMetrics.firestoreReadTimeoutCount++;
+      }
+    } else if (isUnavailable) {
+      classification = "unavailable";
+      isTransient = true;
+      firestoreMetrics.firestoreUnavailableCount++;
+    } else if (isInternal) {
+      classification = "internal";
+      isTransient = true;
+    }
+
+    const telemetryReport = {
+      telemetryType: "FIRESTORE_ERROR_CLASSIFICATION",
+      operation,
+      collection,
+      docPath,
+      projectId,
+      databaseId,
+      errCode,
+      errMsg,
+      classification,
+      isTransient
+    };
+
+    console.error("[Firestore Classification Telemetry]:", JSON.stringify(telemetryReport, null, 2));
+    return { classification, isTransient, telemetryReport };
+  }
+
+  function createCircuitBreaker(name: string, minSampleSize: number = 10, failureThreshold: number = 0.5) {
+    return {
+      name,
+      state: "CLOSED" as "CLOSED" | "OPEN" | "HALF_OPEN",
+      lastFailureTime: 0,
+      cooldownMs: 15000,
+      recentResults: [] as boolean[],
+      maxWindowSize: 20,
+      minSampleSize,
+      failureThreshold,
+      activeRequests: 0,
+      recordSuccess() {
+        this.activeRequests = Math.max(0, this.activeRequests - 1);
+        this.recentResults.push(true);
+        if (this.recentResults.length > this.maxWindowSize) {
+          this.recentResults.shift();
+        }
+        if (this.state === "HALF_OPEN") {
+          console.log(`[Firestore Circuit Breaker - ${this.name}] Half-open probe succeeded! Closing circuit.`);
+          this.state = "CLOSED";
+          this.recentResults = [];
+        }
+      },
+      recordFailure() {
+        this.activeRequests = Math.max(0, this.activeRequests - 1);
+        this.recentResults.push(false);
+        if (this.recentResults.length > this.maxWindowSize) {
+          this.recentResults.shift();
+        }
+        const failures = this.recentResults.filter(r => !r).length;
+        const rate = failures / this.recentResults.length;
+        
+        if (this.state === "CLOSED" && this.recentResults.length >= this.minSampleSize && rate >= this.failureThreshold) {
+          console.error(`[Firestore Circuit Breaker - ${this.name}] Failure rate of ${Math.round(rate * 100)}% (n=${this.recentResults.length}) exceeded threshold. Opening circuit.`);
+          this.state = "OPEN";
+          this.lastFailureTime = Date.now();
+        } else if (this.state === "HALF_OPEN") {
+          console.error(`[Firestore Circuit Breaker - ${this.name}] Half-open probe failed! Opening circuit again.`);
+          this.state = "OPEN";
+          this.lastFailureTime = Date.now();
+        }
+      },
+      allowRequest(): boolean {
+        if (faultInjectionState === "latency") {
+          return false;
+        }
+        if (this.state === "CLOSED") {
+          this.activeRequests++;
+          return true;
+        }
+        if (this.state === "OPEN") {
+          const elapsed = Date.now() - this.lastFailureTime;
+          if (elapsed > this.cooldownMs) {
+            // Allow a limited number of probes in HALF_OPEN
+            if (this.activeRequests === 0) {
+              console.log(`[Firestore Circuit Breaker - ${this.name}] Cooldown elapsed. Transitioning to HALF_OPEN.`);
+              this.state = "HALF_OPEN";
+              this.activeRequests++;
+              return true;
+            }
+          }
+          return false;
+        }
+        if (this.state === "HALF_OPEN") {
+          // Only allow 1 request in flight during HALF_OPEN
+          if (this.activeRequests === 0) {
+            this.activeRequests++;
+            return true;
+          }
+          return false;
+        }
+        return true;
+      }
+    };
+  }
+
+  const destinationCoreBreaker = createCircuitBreaker("DESTINATION_CORE", 10, 0.5);
+  const destinationSearchCacheBreaker = createCircuitBreaker("DESTINATION_SEARCH_CACHE", 10, 0.5);
+  const sharedPlanBreaker = createCircuitBreaker("SHARED_PLAN", 10, 0.5);
+  const nonCriticalCircuitBreaker = createCircuitBreaker("NON_CRITICAL", 5, 0.5);
+
+  async function executeFirestoreOperationWithRetry<T>(
+    operationFn: () => Promise<T>,
+    operationName: string,
+    collection: string,
+    docPath: string,
+    maxRetries = 2
+  ): Promise<T> {
+    let attempt = 0;
+    let delay = 100;
+    while (true) {
+      if (faultInjectionState === "unavailable") {
+        throw { code: "unavailable", message: "Fault injection: Database is unavailable" };
+      }
+      try {
+        const start = Date.now();
+        const res = await operationFn();
+        const duration = Date.now() - start;
+        if (operationName === "read") {
+          latencyTracker.recordRead(duration);
+        } else {
+          latencyTracker.recordWrite(duration);
+        }
+        return res;
+      } catch (err: any) {
+        attempt++;
+        const { classification, isTransient } = classifyFirestoreError(err, operationName, collection, docPath);
+        
+        if (isTransient && attempt <= maxRetries) {
+          console.warn(`[Firestore Retry] Transient error (${classification}) on ${operationName} ${collection}/${docPath}. Retrying attempt ${attempt}/${maxRetries} after ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          delay *= 2;
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  async function executeWriteWithIdempotencyAndTimeout(
+    collectionName: string,
+    docId: string,
+    writePromiseFn: () => Promise<any>,
+    idempotencyKey: string,
+    timeoutMs: number = 2500
+  ): Promise<any> {
+    const traceId = crypto.randomUUID();
+    const writeStartedAt = new Date().toISOString();
+
+    let timeoutReturnedAt: string | null = null;
+    let underlyingWriteCompletedAt: string | null = null;
+    let underlyingWriteResult: string | null = null;
+
+    let timeoutTimer: NodeJS.Timeout;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        timeoutReturnedAt = new Date().toISOString();
+        reject(new Error("OUTCOME_UNKNOWN"));
+      }, timeoutMs);
+    });
+
+    try {
+      const result = await Promise.race([
+        writePromiseFn().then((res) => {
+          clearTimeout(timeoutTimer);
+          underlyingWriteCompletedAt = new Date().toISOString();
+          underlyingWriteResult = "success";
+          return res;
+        }).catch((err) => {
+          clearTimeout(timeoutTimer);
+          underlyingWriteCompletedAt = new Date().toISOString();
+          underlyingWriteResult = `failure: ${err.message}`;
+          throw err;
+        }),
+        timeoutPromise
+      ]);
+
+      console.log(`[Firestore Write Telemetry] Completed synchronously. TraceId: ${traceId}, IdempotencyKey: ${idempotencyKey}, Started: ${writeStartedAt}, Completed: ${underlyingWriteCompletedAt}, Result: ${underlyingWriteResult}`);
+      return result;
+    } catch (err: any) {
+      if (err.message === "OUTCOME_UNKNOWN") {
+        console.warn(`[Firestore Write Timeout] Write returned on timeout. State is OUTCOME_UNKNOWN. TraceId: ${traceId}, IdempotencyKey: ${idempotencyKey}, Timeout At: ${timeoutReturnedAt}`);
+        
+        // Let it complete in the background, but do not blind retry
+        writePromiseFn().then((res) => {
+          underlyingWriteCompletedAt = new Date().toISOString();
+          underlyingWriteResult = "success";
+          console.log(`[Firestore Write Telemetry - Background Completion] TraceId: ${traceId}, IdempotencyKey: ${idempotencyKey}, Started: ${writeStartedAt}, Completed: ${underlyingWriteCompletedAt}, Result: ${underlyingWriteResult}`);
+        }).catch((backgroundErr) => {
+          underlyingWriteCompletedAt = new Date().toISOString();
+          underlyingWriteResult = `failure: ${backgroundErr.message}`;
+          console.warn(`[Firestore Write Telemetry - Background Failure] TraceId: ${traceId}, IdempotencyKey: ${idempotencyKey}, Started: ${writeStartedAt}, Completed: ${underlyingWriteCompletedAt}, Result: ${underlyingWriteResult}`);
+        });
+
+        throw err;
+      } else {
+        throw err;
+      }
+    }
+  }
 
   const FIRESTORE_DB_ID = process.env.FIRESTORE_DATABASE_ID || process.env.FIREBASE_DATABASE_ID || "ai-studio-trippo-ff4554d0-30e6-46ce-9ce9-47e9504b809c";
 
   const inMemoryRouteCache = new Map<string, { cachedAt: string; response: any }>();
 
-  // Initialize Firebase Web SDK for reliable direct Firestore operations
   let webDb: any;
+
+  async function webGetDocWithTimeout(docRef: any, timeoutMs: number = 2000): Promise<any> {
+    if (faultInjectionState === "latency") {
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 100));
+      throw new Error("Firestore getDoc operation timed out");
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("Firestore getDoc operation timed out"));
+      }, timeoutMs);
+      webGetDoc(docRef).then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      }).catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  async function webGetDocsWithTimeout(queryRef: any, timeoutMs: number = 2000): Promise<any> {
+    if (faultInjectionState === "latency") {
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 100));
+      throw new Error("Firestore getDocs operation timed out");
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("Firestore getDocs operation timed out"));
+      }, timeoutMs);
+      webGetDocs(queryRef).then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      }).catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  function sanitizeForFirestore(val: any): any {
+    if (val === undefined) return null;
+    if (val === null || typeof val !== "object") return val;
+    if (val instanceof Date) return val;
+    if (Array.isArray(val)) {
+      return val.map(sanitizeForFirestore);
+    }
+    const clean: Record<string, any> = {};
+    for (const [key, v] of Object.entries(val)) {
+      if (v !== undefined) {
+        clean[key] = sanitizeForFirestore(v);
+      }
+    }
+    return clean;
+  }
+
+  async function webSetDocWithTimeout(docRef: any, data: any, options?: any, timeoutMs: number = 2000): Promise<any> {
+    const cleanData = sanitizeForFirestore(data);
+    if (faultInjectionState === "latency") {
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 100));
+      throw new Error("Firestore setDoc operation timed out");
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("Firestore setDoc operation timed out"));
+      }, timeoutMs);
+      webSetDoc(docRef, cleanData, options).then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      }).catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
   try {
     const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
     const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf8"));
     const webApp = initializeWebFirebaseApp(firebaseConfig);
-    webDb = getWebFirestore(webApp, firebaseConfig.firestoreDatabaseId || FIRESTORE_DB_ID);
+    
+    const expectedDatabaseId = firebaseConfig.firestoreDatabaseId || FIRESTORE_DB_ID;
+    const actualDatabaseId = firebaseConfig.firestoreDatabaseId || process.env.FIRESTORE_DATABASE_ID;
+
+    console.log(`[Firestore DB Check] projectId: ${firebaseConfig.projectId}, databaseId: ${actualDatabaseId}, environment: ${process.env.NODE_ENV || 'development'}, credentialProjectId: ${firebaseConfig.projectId}`);
+
+    if (!actualDatabaseId || actualDatabaseId === "(default)") {
+      console.error(`[DATABASE_CONFIG_FATAL]`);
+      console.error(`expectedDatabaseId=${expectedDatabaseId || "ai-studio-trippo-ff4554d0-30e6-46ce-9ce9-47e9504b809c"}`);
+      console.error(`actualDatabaseId=${actualDatabaseId || "(default)"}`);
+      process.exit(1);
+    }
+
+    try {
+      setWebFirestoreLogLevel('error');
+    } catch (_e) {}
+    webDb = initializeWebFirestore(webApp, {
+      experimentalForceLongPolling: true
+    }, actualDatabaseId);
     console.log("Firebase Web SDK successfully initialized for Firestore operations.");
+
+    // Pre-populate custom destinations from Firestore collection on startup
+    try {
+      const colRef = webCollection(webDb, "destinations");
+      const snap = await webGetDocsWithTimeout(colRef, 1500);
+      let count = 0;
+      snap.forEach((docSnap: any) => {
+        const dest = docSnap.data();
+        if (dest && dest.id) {
+          upsertRuntimeDestination(dest as any);
+          count++;
+        }
+      });
+      console.log(`Successfully pre-loaded ${count} custom destinations from Firestore on startup.`);
+    } catch (dbLoadErr: any) {
+      console.warn("[Firestore Startup Load Warning] Failed to pre-load custom destinations:", dbLoadErr.message);
+    }
   } catch (webInitErr: any) {
     console.error("Critical: Firebase Web SDK failed to initialize:", webInitErr.message);
   }
@@ -50,44 +584,205 @@ async function startServer() {
   // In-memory cache fallback for Firestore reads and writes to gracefully handle quota limits
   const inMemoryFirestoreCache = new Map<string, any>();
 
-  // Wrapper helpers for direct and secure Firestore Web SDK transactions
-  async function webGetDocData(collectionName: string, docId: string): Promise<{ exists: boolean; data?: any }> {
-    const key = `${collectionName}/${docId}`;
-    if (inMemoryFirestoreCache.has(key)) {
-      return { exists: true, data: inMemoryFirestoreCache.get(key) };
-    }
-    if (!webDb) return { exists: false };
-    try {
-      const docRef = webDoc(webDb, collectionName, docId);
-      const snap = await webGetDoc(docRef);
-      if (snap.exists()) {
-        const val = snap.data();
-        inMemoryFirestoreCache.set(key, val);
-        return { exists: true, data: val };
+  const offlineWriteQueue: Array<{ collectionName: string; docId: string; data: any; options?: { merge: boolean } }> = [];
+
+  async function flushOfflineWriteQueue() {
+    if (offlineWriteQueue.length === 0) return;
+    if (!nonCriticalCircuitBreaker.allowRequest() || !webDb) return;
+
+    console.log(`[Offline Queue] Attempting to flush ${offlineWriteQueue.length} non-critical queued writes...`);
+    const queueToProcess = [...offlineWriteQueue];
+    offlineWriteQueue.length = 0; // Temporarily drain to prevent re-entrant loops
+
+    for (const item of queueToProcess) {
+      try {
+        const docRef = webDoc(webDb, item.collectionName, item.docId);
+        const idempotencyKey = getLogicalIdempotencyKey(item.collectionName, item.docId, item.data || {});
+        await executeWriteWithIdempotencyAndTimeout(
+          item.collectionName,
+          item.docId,
+          () => webSetDocWithTimeout(docRef, item.data, item.options, 1000),
+          idempotencyKey,
+          1000
+        );
+        console.log(`[Offline Queue] Successfully flushed write for ${item.collectionName}/${item.docId}`);
+      } catch (err: any) {
+        console.error(`[Offline Queue] Flush failed for ${item.collectionName}/${item.docId}, re-queueing:`, err.message);
+        // Put back at head of the queue to preserve sequence
+        offlineWriteQueue.unshift(item);
+        break; // Stop flushing if we hit another error
       }
-      return { exists: false };
-    } catch (err: any) {
-      console.warn(`[Firestore Read Warning] Failed to read ${key} from Firestore (using in-memory fallback):`, err?.message || err);
-      return { exists: false };
     }
   }
 
+  function getCircuitBreakerForCollection(collectionName: string) {
+    if (["destinations", "destinationProviderMappings"].includes(collectionName)) {
+      return destinationCoreBreaker;
+    }
+    if (collectionName === "destinationSearchCache") {
+      return destinationSearchCacheBreaker;
+    }
+    if (collectionName === "shared_plans") {
+      return sharedPlanBreaker;
+    }
+    return nonCriticalCircuitBreaker;
+  }
+
+  // Wrapper helpers for direct and secure Firestore Web SDK transactions
+  async function webGetDocData(collectionName: string, docId: string): Promise<{ exists: boolean; data?: any; source: string }> {
+    const key = `${collectionName}/${docId}`;
+    const hasCache = inMemoryFirestoreCache.has(key);
+    const cb = getCircuitBreakerForCollection(collectionName);
+    const isCritical = cb === destinationCoreBreaker || cb === sharedPlanBreaker;
+    const timeoutMs = isCritical ? 1000 : 500;
+    
+    if (!cb.allowRequest()) {
+      firestoreMetrics.firestoreFallbackToMemoryCount++;
+      if (hasCache) {
+        return { exists: true, data: inMemoryFirestoreCache.get(key), source: "memory_cache" };
+      }
+      return { exists: false, source: "unavailable" };
+    }
+
+    if (!webDb) {
+      if (hasCache) {
+        return { exists: true, data: inMemoryFirestoreCache.get(key), source: "memory_cache" };
+      }
+      return { exists: false, source: "unavailable" };
+    }
+
+    try {
+      const docRef = webDoc(webDb, collectionName, docId);
+      const snap = await executeFirestoreOperationWithRetry(
+        () => webGetDocWithTimeout(docRef, timeoutMs),
+        "read",
+        collectionName,
+        docId
+      );
+      
+      cb.recordSuccess();
+      
+      // Trigger background queue flush since we proved the database is reachable
+      setTimeout(() => {
+        flushOfflineWriteQueue().catch((err) => console.error("[Offline Queue Flush Err]", err));
+      }, 0);
+
+      if (snap.exists()) {
+        const val = snap.data();
+        inMemoryFirestoreCache.set(key, val);
+        return { exists: true, data: val, source: "firestore" };
+      }
+      return { exists: false, source: "firestore" };
+    } catch (err: any) {
+      cb.recordFailure();
+      firestoreMetrics.firestoreFallbackToMemoryCount++;
+      if (hasCache) {
+        return { exists: true, data: inMemoryFirestoreCache.get(key), source: "memory_cache" };
+      }
+      return { exists: false, source: "unavailable" };
+    }
+  }
+
+  function getLogicalIdempotencyKey(collectionName: string, docId: string, data: any): string {
+    const payload = { ...data };
+    delete payload.updatedAt;
+    delete payload.createdAt;
+    delete payload.fetchedAt;
+    delete payload.id;
+    return crypto.createHash("sha256").update(`${collectionName}-${docId}-${JSON.stringify(payload)}`).digest("hex");
+  }
+
   async function webSetDocData(collectionName: string, docId: string, data: any, options?: { merge: boolean }) {
+    const cleanData = sanitizeForFirestore(data);
     const key = `${collectionName}/${docId}`;
     if (options?.merge && inMemoryFirestoreCache.has(key)) {
       const prev = inMemoryFirestoreCache.get(key);
-      inMemoryFirestoreCache.set(key, { ...prev, ...data });
+      inMemoryFirestoreCache.set(key, { ...prev, ...cleanData });
     } else {
-      inMemoryFirestoreCache.set(key, data);
+      inMemoryFirestoreCache.set(key, cleanData);
     }
 
-    if (!webDb) return;
+    const cb = getCircuitBreakerForCollection(collectionName);
+    const isCritical = cb === destinationCoreBreaker || cb === sharedPlanBreaker;
+    const timeoutMs = isCritical ? 1500 : 500;
+
+    if (!cb.allowRequest() || !webDb) {
+      if (!isCritical) {
+        console.warn(`[Offline Queue] Queueing non-critical write for ${key} due to closed database or open circuit.`);
+        offlineWriteQueue.push({ collectionName, docId, data: cleanData, options });
+      } else {
+        console.warn(`[Critical Write Blocked] Skipping critical write for ${key} due to closed database or open circuit.`);
+        throw new Error("Critical database operation unavailable");
+      }
+      return;
+    }
+
     try {
       const docRef = webDoc(webDb, collectionName, docId);
-      await webSetDoc(docRef, data, options);
+      const idempotencyKey = getLogicalIdempotencyKey(collectionName, docId, cleanData || {});
+      
+      await executeWriteWithIdempotencyAndTimeout(
+        collectionName,
+        docId,
+        () => webSetDocWithTimeout(docRef, cleanData, options, timeoutMs),
+        idempotencyKey,
+        timeoutMs
+      );
+      cb.recordSuccess();
+
+      // Trigger background queue flush
+      setTimeout(() => {
+        flushOfflineWriteQueue().catch((err) => console.error("[Offline Queue Flush Err]", err));
+      }, 0);
     } catch (err: any) {
-      console.warn(`[Firestore Write Warning] Quota exceeded or network issue for ${key}. Cached in memory:`, err?.message || err);
+      cb.recordFailure();
+      console.warn(`[Offline Queue] Write failed for ${key}, queueing for retry:`, err?.message || err);
+      if (!isCritical) {
+        offlineWriteQueue.push({ collectionName, docId, data, options });
+      } else {
+        throw err;
+      }
     }
+  }
+
+  function determineDegradedStatus(isWeatherDegraded: boolean, holidayStatus: string, eventStatus: string) {
+    const degradedDetails: string[] = [];
+    const sources: any = {};
+    
+    if (isWeatherDegraded) {
+      degradedDetails.push("Weather Forecast");
+      sources.weather = { status: "failed", reasonCode: "UNAVAILABLE_OR_TIMEOUT" };
+    } else {
+      sources.weather = { status: "success" };
+    }
+
+    if (holidayStatus === "failed" || holidayStatus === "partial") {
+      degradedDetails.push("Public Holidays");
+      sources.holidays = { status: holidayStatus, reasonCode: "API_QUOTA_OR_NETWORK" };
+    } else {
+      sources.holidays = { status: "success" };
+    }
+
+    if (eventStatus === "failed" || eventStatus === "partial") {
+      degradedDetails.push("Local Events");
+      sources.events = { status: eventStatus, reasonCode: "API_QUOTA_OR_NETWORK" };
+    } else {
+      sources.events = { status: "success" };
+    }
+
+    if (degradedDetails.length > 0) {
+      firestoreMetrics.explorePartialResponseCount++;
+      return {
+        status: "partial" as const,
+        degradedDetails,
+        sources
+      };
+    }
+    return {
+      status: "healthy" as const,
+      degradedDetails: [] as string[],
+      sources
+    };
   }
 
   function ensureFirebaseAdmin() {
@@ -117,6 +812,22 @@ async function startServer() {
   } catch (err: any) {
     console.error("Warning: Firebase Admin failed to initialize during server startup:", err.message);
   }
+
+  // Run Destination Grouping Verification Test Suite
+  try {
+    runGroupingVerificationSuite();
+  } catch (err: any) {
+    console.error("Grouping Verification Test Suite warning:", err.message);
+  }
+
+  // Periodic lifecycle worker check & provider mapping recovery
+  setInterval(() => {
+    if (webDb) {
+      processQueue(webDb).catch(err => console.error('[WORKER_ERROR]', err));
+      runProviderMappingRecovery(webDb).catch(err => console.error('[MAPPING_RECOVERY_ERROR]', err));
+    }
+  }, 60000);
+
 
   // Helper to verify Firebase App Check token (Security best practice)
   async function verifyAppCheckToken(req: express.Request): Promise<{ isValid: boolean; error?: string }> {
@@ -1147,13 +1858,13 @@ async function startServer() {
       weather: fallbackWeather,
       congestion: {
         level: "medium",
-        description: `${name}은(는) 이 기간 동안 전반적으로 쾌적하며 주요 명소 주변만 부분적으로 활기를 띱니다.`,
-        descriptionEn: `${name} is generally pleasant during this period, with localized high activity only around major landmarks.`
+        description: `${startDate}부터 ${endDate}까지의 ${name} 여행은 전반적으로 이동 및 관람에 무난한 수준입니다.`,
+        descriptionEn: `Travel in ${name} from ${startDate} to ${endDate} features manageable tourist activity.`
       },
       holidays: [],
       festivals: [],
-      summary: `${name}은(는) 풍부한 역사와 현대적인 매력이 조화를 이루는 로컬 중심지입니다. 현지 식당과 독창적인 골목을 탐색하며 여유로운 여행을 만끽해 보세요.`,
-      summaryEn: `${name} is a vibrant local hub blending rich history with contemporary charm. We recommend exploring local eateries and unique alleys for a relaxed getaway.`,
+      summary: `${startDate}부터 ${endDate}까지의 ${name} 여행은 기본 일정을 소화하기에 적합합니다. 최신 기상과 시설 운영시간을 사전 확인하세요.`,
+      summaryEn: `Visiting ${name} from ${startDate} to ${endDate} is suitable for standard sightseeing. Verify live weather and facility operating hours ahead of time.`,
       recommendationScore: calculateDynamicTravelScore(fallbackWeather, "medium", 0, 0),
       isFallback: true
     };
@@ -1426,8 +2137,22 @@ async function startServer() {
     }
 
     async getForecasts(latitude: number, longitude: number, startDate: string, endDate: string, timezoneId: string): Promise<{ dailyForecasts: any[], hourlyForecasts: any[], summary: WeatherSummary }> {
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&start_date=${startDate}&end_date=${endDate}&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_probability_max,weathercode,wind_speed_10m_max&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,precipitation_probability&timezone=${encodeURIComponent(timezoneId)}`;
-      console.log(`[API Call - Open-Meteo Forecast] Requesting daily/hourly forecast for coords (${latitude}, ${longitude})`);
+      const nowLocal = DateTime.now().setZone(timezoneId || "UTC");
+      const maxAllowed = nowLocal.plus({ days: 16 }).toFormat("yyyy-MM-dd");
+      const minAllowed = nowLocal.minus({ days: 90 }).toFormat("yyyy-MM-dd");
+
+      let effectiveStart = startDate;
+      let effectiveEnd = endDate;
+
+      if (effectiveStart < minAllowed) effectiveStart = minAllowed;
+      if (effectiveEnd > maxAllowed) effectiveEnd = maxAllowed;
+
+      if (effectiveStart > effectiveEnd) {
+        throw new Error(`Requested forecast window (${startDate} to ${endDate}) is outside supported 16-day forecast range.`);
+      }
+
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&start_date=${effectiveStart}&end_date=${effectiveEnd}&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_probability_max,weathercode,wind_speed_10m_max&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,precipitation_probability&timezone=${encodeURIComponent(timezoneId)}`;
+      console.log(`[API Call - Open-Meteo Forecast] Requesting daily/hourly forecast for coords (${latitude}, ${longitude}) [${effectiveStart} to ${effectiveEnd}]`);
       const response = await fetch(url);
       if (!response.ok) {
         throw new Error(`Open-Meteo API failed with status ${response.status}`);
@@ -1581,104 +2306,113 @@ async function startServer() {
     }
 
     async getPastObservations(latitude: number, longitude: number, startDate: string, endDate: string, timezoneId: string): Promise<{ dailyForecasts: any[], hourlyForecasts: any[], summary: WeatherSummary }> {
-      let url = `https://archive-api.open-meteo.com/v1/archive?latitude=${latitude}&longitude=${longitude}&start_date=${startDate}&end_date=${endDate}&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_sum,weather_code,wind_speed_10m_max&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation&timezone=${encodeURIComponent(timezoneId)}`;
-      console.log(`[API Call - Open-Meteo Archive] Requesting past observation data for coords (${latitude}, ${longitude}) from ${startDate} to ${endDate}`);
-      let response = await fetch(url);
-      if (!response.ok) {
-        // Fallback to forecast API which supports past dates up to 92 days
-        url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&start_date=${startDate}&end_date=${endDate}&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_probability_max,weathercode,wind_speed_10m_max&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation&timezone=${encodeURIComponent(timezoneId)}`;
-        response = await fetch(url);
-      }
-      if (!response.ok) {
-        throw new Error(`Open-Meteo Archive API failed with status ${response.status}`);
+      const nowLocal = DateTime.now().setZone(timezoneId || "UTC");
+      const yesterdayStr = nowLocal.minus({ days: 2 }).toFormat("yyyy-MM-dd");
+
+      let archiveEnd = endDate;
+      if (archiveEnd > yesterdayStr) {
+        archiveEnd = yesterdayStr;
       }
 
-      const data = await response.json();
-      const daily = data.daily;
-      const hourly = data.hourly;
+      if (startDate <= archiveEnd) {
+        let url = `https://archive-api.open-meteo.com/v1/archive?latitude=${latitude}&longitude=${longitude}&start_date=${startDate}&end_date=${archiveEnd}&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_sum,weather_code,wind_speed_10m_max&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation&timezone=${encodeURIComponent(timezoneId)}`;
+        console.log(`[API Call - Open-Meteo Archive] Requesting past observation data for coords (${latitude}, ${longitude}) from ${startDate} to ${archiveEnd}`);
+        let response = await fetch(url);
+        if (!response.ok) {
+          console.info(`[Open-Meteo Archive Info] Archive status ${response.status}, falling back to forecast endpoint.`);
+        } else {
+          const data = await response.json();
+          const daily = data.daily;
+          if (daily && daily.time && daily.time.length > 0) {
+            const dailyForecasts: any[] = [];
+            const count = daily.time.length;
 
-      if (!daily || !daily.time || daily.time.length === 0) {
-        throw new Error("No daily observation data returned from Open-Meteo Archive");
-      }
+            for (let i = 0; i < count; i++) {
+              const dateStr = daily.time[i];
+              const tempMax = daily.temperature_2m_max[i];
+              const tempMin = daily.temperature_2m_min[i];
+              const apparentMax = daily.apparent_temperature_max ? daily.apparent_temperature_max[i] : tempMax;
+              const apparentMin = daily.apparent_temperature_min ? daily.apparent_temperature_min[i] : tempMin;
+              const precipSum = daily.precipitation_sum ? daily.precipitation_sum[i] : 0;
+              const precipProb = precipSum > 0.1 ? 100 : 0;
+              const wCode = daily.weather_code !== undefined ? daily.weather_code[i] : (daily.weathercode !== undefined ? daily.weathercode[i] : 0);
+              const windMax = daily.wind_speed_10m_max ? daily.wind_speed_10m_max[i] : 5;
 
-      const dailyForecasts: any[] = [];
-      const count = daily.time.length;
+              const statusInfo = getWeatherStatusFromCode(wCode);
 
-      for (let i = 0; i < count; i++) {
-        const dateStr = daily.time[i];
-        const tempMax = daily.temperature_2m_max[i];
-        const tempMin = daily.temperature_2m_min[i];
-        const apparentMax = daily.apparent_temperature_max ? daily.apparent_temperature_max[i] : tempMax;
-        const apparentMin = daily.apparent_temperature_min ? daily.apparent_temperature_min[i] : tempMin;
-        const precipSum = daily.precipitation_sum ? daily.precipitation_sum[i] : 0;
-        const precipProb = precipSum > 0.1 ? 100 : 0;
-        const wCode = daily.weather_code !== undefined ? daily.weather_code[i] : (daily.weathercode !== undefined ? daily.weathercode[i] : 0);
-        const windMax = daily.wind_speed_10m_max ? daily.wind_speed_10m_max[i] : 5;
+              const dt = DateTime.fromISO(dateStr, { zone: timezoneId });
+              const dayOfWeekKo = ["일", "월", "화", "수", "목", "금", "토"][dt.weekday % 7];
+              const dayOfWeekEn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dt.weekday % 7];
+              const formattedDate = `${dt.month}/${dt.day} ${dayOfWeekKo}`;
+              const formattedDateEn = `${dt.month}/${dt.day} ${dayOfWeekEn}`;
 
-        const statusInfo = getWeatherStatusFromCode(wCode);
+              dailyForecasts.push({
+                date: dateStr,
+                displayDate: formattedDate,
+                displayDateEn: formattedDateEn,
+                tempMax,
+                tempMin,
+                apparentMax,
+                apparentMin,
+                precipSum,
+                precipProb,
+                weatherCode: wCode,
+                weatherStatus: statusInfo.text,
+                weatherStatusEn: statusInfo.textEn,
+                weatherIcon: statusInfo.icon,
+                averageHumidity: 60,
+                humidityRange: "50~70%",
+                sensoryStatus: "보통",
+                sensoryStatusEn: "Moderate",
+                maxWindSpeedMps: parseFloat((windMax / 3.6).toFixed(1))
+              });
+            }
 
-        const dt = DateTime.fromISO(dateStr, { zone: timezoneId });
-        const dayOfWeekKo = ["일", "월", "화", "수", "목", "금", "토"][dt.weekday % 7];
-        const dayOfWeekEn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dt.weekday % 7];
-        const formattedDate = `${dt.month}/${dt.day} ${dayOfWeekKo}`;
-        const formattedDateEn = `${dt.month}/${dt.day} ${dayOfWeekEn}`;
+            const maxTemps = dailyForecasts.map(f => f.tempMax);
+            const minTemps = dailyForecasts.map(f => f.tempMin);
+            const maxApparents = dailyForecasts.map(f => f.apparentMax);
 
-        dailyForecasts.push({
-          date: dateStr,
-          displayDate: formattedDate,
-          displayDateEn: formattedDateEn,
-          tempMax,
-          tempMin,
-          apparentMax,
-          apparentMin,
-          precipSum,
-          precipProb,
-          weatherCode: wCode,
-          weatherStatus: statusInfo.text,
-          weatherStatusEn: statusInfo.textEn,
-          weatherIcon: statusInfo.icon,
-          averageHumidity: 60,
-          humidityRange: "50~70%",
-          sensoryStatus: "보통",
-          sensoryStatusEn: "Moderate",
-          maxWindSpeedMps: parseFloat((windMax / 3.6).toFixed(1))
-        });
-      }
-
-      const maxTemps = dailyForecasts.map(f => f.tempMax);
-      const minTemps = dailyForecasts.map(f => f.tempMin);
-      const maxApparents = dailyForecasts.map(f => f.apparentMax);
-
-      const maxTemperatureCelsius = Math.max(...maxTemps);
-      const minTemperatureCelsius = Math.min(...minTemps);
-      const maxFeelsLikeCelsius = Math.max(...maxApparents);
-      const rainyDayCount = dailyForecasts.filter(f => f.precipSum > 0.1).length;
-
-      return {
-        dailyForecasts,
-        hourlyForecasts: [],
-        summary: {
-          maxTemperatureCelsius,
-          minTemperatureCelsius,
-          maxFeelsLikeCelsius,
-          averageHumidityPercent: 60,
-          rainyDayCount,
-          maxPrecipitationProbabilityPercent: rainyDayCount > 0 ? 100 : 0,
-          maxWindSpeedMps: 5,
-          heatwaveDayCount: dailyForecasts.filter(f => f.tempMax >= 35).length
+            return {
+              dailyForecasts,
+              hourlyForecasts: [],
+              summary: {
+                maxTemperatureCelsius: Math.max(...maxTemps),
+                minTemperatureCelsius: Math.min(...minTemps),
+                maxFeelsLikeCelsius: Math.max(...maxApparents),
+                averageHumidityPercent: 60,
+                rainyDayCount: dailyForecasts.filter(f => f.precipSum > 0.1).length,
+                maxPrecipitationProbabilityPercent: Math.max(...dailyForecasts.map(f => f.precipProb)),
+                maxWindSpeedMps: Math.max(...dailyForecasts.map(f => f.maxWindSpeedMps || 0)),
+                heatwaveDayCount: dailyForecasts.filter(f => f.tempMax >= 35).length
+              }
+            };
+          }
         }
-      };
+      }
+
+      return this.getForecasts(latitude, longitude, startDate, endDate, timezoneId);
     }
   }
 
   // USA NWS Alerts fetcher (Point 2)
   async function fetchNwsAlerts(latitude: number, longitude: number): Promise<NormalizedOfficialAlert[]> {
     try {
-      const url = `https://api.weather.gov/alerts/active?point=${latitude.toFixed(4)},${longitude.toFixed(4)}`;
-      console.log(`[Alert API Call - NWS] Requesting US alerts for coords (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`);
-      const response = await fetch(url, { headers: { "User-Agent": "TrippoTravelApp/1.0" } });
+      if (typeof latitude !== 'number' || typeof longitude !== 'number' || isNaN(latitude) || isNaN(longitude)) {
+        return [];
+      }
+      const latFixed = latitude.toFixed(4);
+      const lonFixed = longitude.toFixed(4);
+      const url = `https://api.weather.gov/alerts/active?point=${latFixed},${lonFixed}`;
+      console.log(`[Alert API Call - NWS] Requesting US alerts for coords (${latFixed}, ${lonFixed})`);
+      const response = await fetch(url, { 
+        headers: { 
+          "User-Agent": "TrippoTravelApp/1.0 (trippo-support@trippo.app)",
+          "Accept": "application/geo+json, application/json"
+        } 
+      });
       if (!response.ok) {
-        console.warn(`NWS alerts endpoint failed with status: ${response.status}`);
+        // NWS returns 400 when point is outside US forecast zones or on non-land grid boundaries.
+        console.info(`[NWS Alerts] Info: Response status ${response.status} for coords (${latFixed}, ${lonFixed}). Continuing without active alerts.`);
         return [];
       }
       const data = await response.json();
@@ -1699,32 +2433,35 @@ async function startServer() {
       }
       return alerts;
     } catch (err: any) {
-      console.warn("Failed to fetch US weather alerts:", err.message);
+      console.info("[NWS Alerts] Notice: US weather alerts lookup completed gracefully:", err?.message || err);
       return [];
     }
   }
 
-  // Korea/Japan Gemini Search grounded Alert resolver (Point 2)
+  // Korea/Japan/US Gemini Search grounded Alert resolver (Point 2)
   async function fetchGroundedAlerts(countryCode: string, cityName: string, ai: any): Promise<NormalizedOfficialAlert[]> {
     try {
       const queryStr = countryCode === "KR" 
         ? `기상청 날씨 특보 경보 ${cityName} 현재 상황`
-        : `Japan Meteorological Agency JMA active warnings alerts ${cityName} current status`;
+        : countryCode === "JP"
+        ? `Japan Meteorological Agency JMA active warnings alerts ${cityName} current status`
+        : `National Weather Service NWS active warnings advisories alerts ${cityName} current status`;
       
       console.log(`[Alert Grounded Search] Querying live alerts for ${cityName} (${countryCode})`);
-      const prompt = `Please search Google to find any currently active official meteorological warnings, advisories, or alerts (e.g., heatwave warning, typhoon advisory, heavy rain, strong wind, heavy snow, cold wave) issued by the official national meteorological agency (KMA for South Korea, JMA for Japan) for the region of "${cityName}" (${countryCode}).
+      const agencyName = countryCode === "KR" ? "KMA for South Korea" : countryCode === "JP" ? "JMA for Japan" : "NWS for United States";
+      const prompt = `Please search Google to find any currently active official meteorological warnings, advisories, or alerts (e.g., heatwave warning, typhoon/hurricane advisory, heavy rain/flood, strong wind/tornado, heavy snow/blizzard, cold wave) issued by the official national meteorological agency (${agencyName}) for the region of "${cityName}" (${countryCode}).
       
       Return the results as a JSON array matching this exact schema:
       {
         "alerts": [
           {
-            "event": "폭염 경보" or warning/advisory type in original language,
+            "event": "폭염 경보 or warning/advisory type in original language",
             "area": "affected city/region",
             "onset": "ISO 8601 string or date when active",
             "expires": "expiration time if known, or empty string",
-            "description": "short description of warning in Korean",
-            "instruction": "safety instruction in Korean",
-            "source": "Korea Meteorological Administration" or "Japan Meteorological Agency",
+            "description": "short description of warning in Korean or English",
+            "instruction": "safety instruction in Korean or English",
+            "source": "Official Meteorological Agency Name",
             "checkedAt": "current ISO date string"
           }
         ]
@@ -1770,16 +2507,24 @@ async function startServer() {
       }
       return [];
     } catch (err: any) {
-      console.warn(`Grounded alerts fetch failed for ${cityName} (${countryCode}):`, err.message);
+      console.info(`[Alerts Info] Grounded alerts search completed for ${cityName} (${countryCode}):`, err?.message || err);
       return [];
     }
   }
 
   // Route warnings selector (Point 2)
   async function fetchOfficialAlerts(countryCode: string, cityName: string, latitude: number, longitude: number, ai: any): Promise<{ alerts: NormalizedOfficialAlert[], provider: string }> {
-    const normCountry = countryCode.toUpperCase();
+    const normCountry = (countryCode || "").toUpperCase();
     if (normCountry === "US") {
-      const alerts = await fetchNwsAlerts(latitude, longitude);
+      let alerts = await fetchNwsAlerts(latitude, longitude);
+      if (alerts.length === 0 && ai && cityName) {
+        try {
+          const groundedUsAlerts = await fetchGroundedAlerts("US", cityName, ai);
+          if (groundedUsAlerts.length > 0) {
+            return { alerts: groundedUsAlerts, provider: "NWS (Grounded)" };
+          }
+        } catch (e) {}
+      }
       return { alerts, provider: "NWS" };
     } else if (normCountry === "KR" && ai) {
       const alerts = await fetchGroundedAlerts("KR", cityName, ai);
@@ -1835,27 +2580,154 @@ async function startServer() {
     return { ko: tipsKo, en: tipsEn };
   }
 
+  function generateSyntheticClimateResponse(cityId: string, countryCode: string, cityName: string, startDate: string, endDate: string, latitude: number, longitude: number, timezoneId: string): NormalizedWeatherResponse {
+    const dtStart = DateTime.fromISO(startDate, { zone: timezoneId || "UTC" });
+    const dtEnd = DateTime.fromISO(endDate, { zone: timezoneId || "UTC" });
+    const numDays = Math.max(1, Math.ceil(dtEnd.diff(dtStart, "days").days) + 1);
+
+    const absLat = Math.abs(latitude || 0);
+    const isNorthern = (latitude || 0) >= 0;
+
+    const dailyForecasts: any[] = [];
+    for (let d = 0; d < numDays; d++) {
+      const curDate = dtStart.plus({ days: d });
+      const month = curDate.month;
+      
+      const isSummer = isNorthern ? (month >= 6 && month <= 8) : (month === 12 || month <= 2);
+      const isWinter = isNorthern ? (month === 12 || month <= 2) : (month >= 6 && month <= 8);
+
+      let baseHigh = 22;
+      let baseLow = 14;
+
+      if (absLat > 50) {
+        baseHigh = isSummer ? 20 : (isWinter ? 2 : 12);
+        baseLow = isSummer ? 10 : (isWinter ? -5 : 4);
+      } else if (absLat > 30) {
+        baseHigh = isSummer ? 30 : (isWinter ? 12 : 22);
+        baseLow = isSummer ? 20 : (isWinter ? 3 : 12);
+      } else {
+        baseHigh = 31;
+        baseLow = 23;
+      }
+
+      const tempMax = baseHigh;
+      const tempMin = baseLow;
+      const dayOfWeekKo = ["일", "월", "화", "수", "목", "금", "토"][curDate.weekday % 7];
+      const dayOfWeekEn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][curDate.weekday % 7];
+
+      dailyForecasts.push({
+        date: curDate.toFormat("yyyy-MM-dd"),
+        displayDate: `${curDate.month}/${curDate.day} ${dayOfWeekKo}`,
+        displayDateEn: `${curDate.month}/${curDate.day} ${dayOfWeekEn}`,
+        tempMax,
+        tempMin,
+        apparentMax: tempMax + 1,
+        apparentMin: tempMin,
+        precipSum: 0,
+        precipProb: 10,
+        weatherCode: 1,
+        weatherStatus: "대체로 맑음",
+        weatherStatusEn: "Mainly Clear",
+        weatherIcon: "🌤️",
+        averageHumidity: 55,
+        humidityRange: "45~65%",
+        sensoryStatus: "쾌적함",
+        sensoryStatusEn: "Comfortable",
+        maxWindSpeedMps: 3.2,
+        dataType: "climate_average"
+      });
+    }
+
+    const maxTemps = dailyForecasts.map(f => f.tempMax);
+    const minTemps = dailyForecasts.map(f => f.tempMin);
+    const avgMax = Math.max(...maxTemps);
+    const avgMin = Math.min(...minTemps);
+    const avgMean = Math.round((avgMax + avgMin) / 2);
+
+    return {
+      cityId,
+      countryCode,
+      latitude: latitude || 0,
+      longitude: longitude || 0,
+      timezoneId: timezoneId || "UTC",
+      startDate,
+      endDate,
+      weatherDataType: 'climate_average',
+      forecastProvider: 'Estimated Climate Baseline',
+      alertProvider: 'None',
+      currentWeather: null,
+      dailyForecasts,
+      hourlyForecasts: [],
+      officialAlerts: [],
+      forecastSummary: null,
+      climateSummary: {
+        averageHighTemperatureCelsius: avgMax,
+        averageLowTemperatureCelsius: avgMin,
+        averageMeanTemperatureCelsius: avgMean,
+        maxObservedTemperatureCelsius: avgMax + 2,
+        minObservedTemperatureCelsius: avgMin - 2,
+        typicalHighRange: `${avgMax - 2}~${avgMax + 2}℃`,
+        typicalLowRange: `${avgMin - 2}~${avgMin + 2}℃`,
+        heatwaveDaysCount: 0,
+        rainyDaysCount: 0,
+        historicalRainyDaysCount: 0,
+        historicalRainyRatioPercent: 10,
+        totalPrecipitationMm: 0,
+        averageHumidityPercent: 55
+      },
+      hasPastObservation: false,
+      hasForecast: false,
+      hasClimateAverage: true,
+      hasMixedDataTypes: false,
+      dynamicTips: ["기후 평년 기준에 맞춘 예상 날씨 정보입니다."],
+      dynamicTipsKo: ["기후 평년 기준에 맞춘 예상 날씨 정보입니다."],
+      dynamicTipsEn: ["Weather information based on estimated climate baselines."],
+      fetchedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      cacheVersion: 'weather-v3',
+      averageTemp: avgMean,
+      humidity: 55,
+      averageHumidity: 55,
+      apparentSensoryStatus: "쾌적함",
+      precipDays: 0,
+      maxPrecipProb: 10,
+      totalPrecipitation: 0,
+      precipType: "없음",
+      averageTempMax: avgMax,
+      averageTempMin: avgMin,
+      averageTempMean: avgMean,
+      tempMaxRange: `${avgMax - 2}~${avgMax + 2}℃`,
+      tempMinRange: `${avgMin - 2}~${avgMin + 2}℃`,
+      apparentMax: `${avgMax + 1}℃`,
+      overallTempMax: avgMax + 2,
+      overallTempMin: avgMin - 2,
+      heatWaveDays: 0,
+      humidityRange: "45~65%"
+    };
+  }
+
   // Grounded Climate Average Generator (Point 1, 5)
   async function fetchGroundedClimateAverage(cityId: string, countryCode: string, cityName: string, startDate: string, endDate: string, latitude: number, longitude: number, timezoneId: string, ai: any): Promise<NormalizedWeatherResponse> {
     console.log(`[Historical Climate] Fetching high-quality grounded historical climate reports for ${cityName}`);
     
     const dtStart = DateTime.fromISO(startDate, { zone: timezoneId || "UTC" });
     const dtEnd = DateTime.fromISO(endDate, { zone: timezoneId || "UTC" });
-    const numDays = Math.ceil(dtEnd.diff(dtStart, "days").days) + 1;
+    const daysDiff = Math.max(0, Math.ceil(dtEnd.diff(dtStart, "days").days));
+    const numDays = daysDiff + 1;
     
     // Last 3 completed calendar years before 2026
     const years = [2025, 2024, 2023];
     const promises = years.map(async (y) => {
       try {
-        let startStr = `${y}-${dtStart.toFormat("MM-dd")}`;
-        let endStr = `${y}-${dtEnd.toFormat("MM-dd")}`;
-        const isLeap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
-        if (dtStart.month === 2 && dtStart.day === 29 && !isLeap) {
-          startStr = `${y}-02-28`;
+        let startDtYear = dtStart.set({ year: y });
+        if (!startDtYear.isValid) {
+          startDtYear = DateTime.fromISO(`${y}-02-28`, { zone: timezoneId || "UTC" });
         }
-        if (dtEnd.month === 2 && dtEnd.day === 29 && !isLeap) {
-          endStr = `${y}-02-28`;
-        }
+        const endDtYear = startDtYear.plus({ days: daysDiff });
+
+        const startStr = startDtYear.toFormat("yyyy-MM-dd");
+        const endStr = endDtYear.toFormat("yyyy-MM-dd");
+
         const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${latitude}&longitude=${longitude}&start_date=${startStr}&end_date=${endStr}&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_sum,wind_speed_10m_max,weather_code&hourly=relative_humidity_2m&timezone=${encodeURIComponent(timezoneId)}`;
         console.log(`[Historical Climate Archive API] Querying: ${url}`);
         const res = await fetch(url);
@@ -1873,7 +2745,8 @@ async function startServer() {
     const validResults = results.filter(r => r && r.daily && r.daily.time && r.daily.time.length > 0);
 
     if (validResults.length === 0) {
-      throw new Error("Failed to retrieve any historical climate data from Open-Meteo Archive API.");
+      console.info(`[Historical Climate] Archive API unavailable for ${cityName}, generating estimated climate baseline.`);
+      return generateSyntheticClimateResponse(cityId, countryCode, cityName, startDate, endDate, latitude, longitude, timezoneId);
     }
 
     const dailyForecasts: any[] = [];
@@ -2811,8 +3684,16 @@ CRITICAL MANDATES:
         });
         holidayNormalizedCount = normalized.length;
         const filtered = normalized.filter(item => item.date >= startDate && item.date <= endDate);
-        holidayFilteredCount = filtered.length;
-        holidayStatus = filtered.length === 0 ? "empty" : "success";
+        const seenHolidayIds = new Set<string>();
+        const uniqueFiltered: any[] = [];
+        for (const item of filtered) {
+          if (!seenHolidayIds.has(item.id)) {
+            seenHolidayIds.add(item.id);
+            uniqueFiltered.push(item);
+          }
+        }
+        holidayFilteredCount = uniqueFiltered.length;
+        holidayStatus = uniqueFiltered.length === 0 ? "empty" : "success";
 
         return {
           provider: holidayProvider,
@@ -2820,7 +3701,7 @@ CRITICAL MANDATES:
           rawCount: holidayRawCount,
           normalizedCount: holidayNormalizedCount,
           filteredCount: holidayFilteredCount,
-          items: filtered
+          items: uniqueFiltered
         };
       }
 
@@ -2840,8 +3721,16 @@ CRITICAL MANDATES:
       }));
       holidayNormalizedCount = normalizedStatic.length;
       const filteredStatic = normalizedStatic.filter(item => item.date >= startDate && item.date <= endDate);
-      holidayFilteredCount = filteredStatic.length;
-      holidayStatus = filteredStatic.length === 0 ? "empty" : "success";
+      const seenStaticIds = new Set<string>();
+      const uniqueStaticFiltered: any[] = [];
+      for (const item of filteredStatic) {
+        if (!seenStaticIds.has(item.id)) {
+          seenStaticIds.add(item.id);
+          uniqueStaticFiltered.push(item);
+        }
+      }
+      holidayFilteredCount = uniqueStaticFiltered.length;
+      holidayStatus = uniqueStaticFiltered.length === 0 ? "empty" : "success";
 
       return {
         provider: "Official Public Holiday Registry",
@@ -2849,7 +3738,7 @@ CRITICAL MANDATES:
         rawCount: holidayRawCount,
         normalizedCount: holidayNormalizedCount,
         filteredCount: holidayFilteredCount,
-        items: filteredStatic
+        items: uniqueStaticFiltered
       };
 
     } catch (err: any) {
@@ -3322,7 +4211,11 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
         if (Array.isArray(parsed)) return parsed;
       }
     } catch (err: any) {
-      console.warn(`[Gemini Grounded Events Warning] City: ${cityName}, Error:`, err.message);
+      if (err.message?.includes('429') || err.message?.includes('quota') || err.message?.includes('RESOURCE_EXHAUSTED')) {
+        console.info(`[Gemini Grounded Events Info] Quota limit reached for ${cityName}, falling back to static database.`);
+      } else {
+        console.warn(`[Gemini Grounded Events Warning] City: ${cityName}, Error:`, err.message);
+      }
     }
     return [];
   }
@@ -4346,17 +5239,19 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
 
         // Requirement 2: Use destination timezone for all date logic
         const destinationToday = nowLocal.toFormat("yyyy-MM-dd");
+        const endLocal = DateTime.fromISO(endDate, { zone: timezoneId || "Asia/Tokyo" });
+        const daysUntilEnd = Math.ceil(endLocal.startOf("day").diff(nowLocal.startOf("day"), "days").days);
 
         // Determine Weather Data Type (Requirement 1 & 3 & 5 & Strict Separation)
         let weatherDataType: 'past_observation' | 'live_conditions' | 'short_term_forecast' | 'medium_term_forecast' | 'climate_average' = 'climate_average';
         if (daysUntilStart < 0) {
           weatherDataType = 'past_observation';
+        } else if (daysUntilStart > 16 || daysUntilEnd > 16) {
+          weatherDataType = 'climate_average';
         } else if (daysUntilStart <= 10) {
           weatherDataType = daysUntilStart === 0 ? 'live_conditions' : 'short_term_forecast';
-        } else if (daysUntilStart <= 16) {
-          weatherDataType = 'medium_term_forecast';
         } else {
-          weatherDataType = 'climate_average';
+          weatherDataType = 'medium_term_forecast';
         }
 
         let weatherData: NormalizedWeatherResponse;
@@ -4527,7 +5422,7 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
               cacheVersion: "weather-v3"
             };
           } catch (forecastErr: any) {
-            console.warn(`[Forecast Call Failed] ${forecastErr.message}. Falling back to Climate Average (Requirement 8).`);
+            console.info(`[Forecast Call Info] ${forecastErr.message}. Utilizing Climate Average Baseline.`);
             weatherData = await fetchGroundedClimateAverage(cityId, countryCode, cityId, startDate, endDate, latitude, longitude, timezoneId, ai);
             weatherData.isFallbackClimate = true;
             weatherData.errorMessage = "최신 예보를 불러오지 못해 최근 기후 평균을 보여드리고 있어요.";
@@ -4604,7 +5499,8 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
           console.error("Failed to fetch stale cache:", staleErr.message);
         }
 
-        throw new Error("Unable to fetch weather. Please try again later.");
+        console.info(`[Weather Fallback] Using synthetic climate baseline for ${cacheKey}`);
+        return generateSyntheticClimateResponse(cityId, countryCode, cityId, startDate, endDate, latitude, longitude, timezoneId);
       }
     })();
 
@@ -4618,16 +5514,21 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
 
   // API Route for City/Region Travel Search and Gemini Analysis
   app.post("/app-api/explore/search", async (req, res) => {
+    const reqStartTime = Date.now();
+    const requestId = (req as any).requestId || crypto.randomUUID();
     const rateLimitWindowMs = 60 * 1000;
     const rateLimitMaxRequests = 1000;
     const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || req.socket.remoteAddress || "unknown";
 
+    console.log(`[EXPLORE_REQUEST_START] requestId: ${requestId}, placeId: ${req.body?.placeId}, name: ${req.body?.name}, timestamp: ${new Date().toISOString()}`);
+
     try {
-      ensureFirebaseAdmin();
-    } catch (adminErr: any) {
-      console.error("Firebase Admin initialization check failed:", adminErr.message);
-      return res.status(500).json({ error: "AUTH_SERVICE_UNAVAILABLE", message: "Database service unavailable." });
-    }
+      try {
+        ensureFirebaseAdmin();
+      } catch (adminErr: any) {
+        console.error("Firebase Admin initialization check failed:", adminErr.message);
+        return res.status(500).json({ error: "AUTH_SERVICE_UNAVAILABLE", message: "Database service unavailable." });
+      }
 
     const authHeader = req.headers.authorization;
     let userId = "guest";
@@ -4657,17 +5558,42 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
     }
 
     const { placeId, name, country, countryCode, timezoneId, latitude, longitude, startDate, endDate, forceRefresh, forceWeatherRefresh } = req.body;
-    if (!placeId || !name || !startDate || !endDate) {
-      return res.status(400).json({ error: "Missing required parameters: placeId, name, startDate, endDate are required." });
+    if (!placeId || typeof placeId !== "string" || placeId.trim() === "") {
+      firestoreMetrics.destinationIdentityUnavailableCount++;
+      return res.status(400).json({
+        error: "DESTINATION_RESOLUTION_REQUIRED",
+        message: "destination identity (ID/placeId) is missing or invalid."
+      });
+    }
+
+    if (!name || typeof name !== "string" || name.trim() === "") {
+      firestoreMetrics.destinationIdentityUnavailableCount++;
+      return res.status(400).json({
+        error: "DESTINATION_RESOLUTION_REQUIRED",
+        message: "destination identity (name) is missing or invalid."
+      });
+    }
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: "Missing required parameters: startDate and endDate are required." });
+    }
+
+    if (!country || typeof country !== "string" || country.trim() === "") {
+      firestoreMetrics.destinationIdentityUnavailableCount++;
+      return res.status(400).json({
+        error: "DESTINATION_RESOLUTION_REQUIRED",
+        message: "destination identity (country) is missing or invalid."
+      });
     }
 
     // Coordinates check
     let latVal = parseFloat(latitude);
     let lngVal = parseFloat(longitude);
-    if (isNaN(latVal) || isNaN(lngVal) || !Number.isFinite(latVal) || !Number.isFinite(lngVal)) {
+    if (isNaN(latVal) || isNaN(lngVal) || !Number.isFinite(latVal) || !Number.isFinite(lngVal) || (latVal === 0 && lngVal === 0) || latVal < -90 || latVal > 90 || lngVal < -180 || lngVal > 180) {
+      firestoreMetrics.destinationIdentityUnavailableCount++;
       return res.status(400).json({
         error: "DESTINATION_RESOLUTION_REQUIRED",
-        message: "입력한 여행지의 정확한 위치를 확인할 수 없습니다."
+        message: "destination identity (coords) is missing or invalid."
       });
     }
 
@@ -4676,12 +5602,22 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
     if (!isValidCountryCode(finalCountryCode)) {
       finalCountryCode = normalizeCountryCode(country, name);
     }
+    if (!finalCountryCode || finalCountryCode === "ZZ" || finalCountryCode === "unknown") {
+      firestoreMetrics.destinationIdentityUnavailableCount++;
+      return res.status(400).json({
+        error: "DESTINATION_RESOLUTION_REQUIRED",
+        message: "destination identity (countryCode) cannot be resolved."
+      });
+    }
 
     let finalTimezone = timezoneId;
     if (!isValidIanaTimezone(finalTimezone)) {
       finalTimezone = await resolveTimezoneFromCoords(latVal, lngVal);
     }
-    const targetTimezone = finalTimezone || "UTC";
+    if (!finalTimezone || finalTimezone === "UTC") {
+      finalTimezone = "UTC";
+    }
+    const targetTimezone = finalTimezone;
 
     // Cache key is generated securely via sha256 of Google Place ID
     const cacheId = sha256(`${placeId}|${startDate}|${endDate}|destination-analysis-v3`);
@@ -4694,7 +5630,7 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
     if (!forceRefresh && !forceWeatherRefresh) {
       try {
         const { exists: cacheExists, data: cacheData } = await webGetDocData("destinationSearchCache", cacheId);
-        if (cacheExists && cacheData && cacheData.report && cacheData.weather?.cacheVersion === "weather-v3" && cacheData.cacheVersion === "events-v3" && cacheData.meta?.apiVersion === "destination-analysis-v4") {
+        if (cacheExists && cacheData && cacheData.report && cacheData.weather?.cacheVersion === "weather-v3" && cacheData.cacheVersion === "events-v3" && cacheData.meta?.apiVersion === "destination-analysis-v5") {
           const createdAt = cacheData.createdAt || 0;
           const resolvedTtl = getCustomCacheTtlMs(startDate, cacheData.weather?.timezoneId || tentativeTimezone);
           const age = Date.now() - createdAt;
@@ -4788,12 +5724,11 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
       const nowLocal = DateTime.now().setZone(targetTimezone);
       const startLocal = DateTime.fromISO(startDate, { zone: targetTimezone });
       const daysUntilStart = Math.ceil(startLocal.startOf("day").diff(nowLocal.startOf("day"), "days").days);
-
       console.log(`[Weather Decision Flow] Days until start: ${daysUntilStart}`);
 
-      try {
       console.log(`[Unified Weather Retrieval] Querying unified weather engine for ${name}...`);
-      weatherData = await getWeather({
+      
+      const weatherPromise = getWeather({
         cityId: name,
         countryCode: finalCountryCode,
         latitude: latVal,
@@ -4802,199 +5737,54 @@ Return ONLY valid JSON array without backticks or extra text. If no events are f
         startDate,
         endDate,
         forceRefresh: !!forceWeatherRefresh || !!forceRefresh
-      }, ai);
-
-      // Execute and print coordinates and local date validation (Point 11)
-      validateCoordinatesAndTimezone(name, finalCountryCode, latVal, lngVal, startDate, targetTimezone);
-    } catch (fErr: any) {
-      console.warn(`[Forecast Fetch Failed] Falling back to climate average gracefully: ${fErr.message}`);
-      isErrorFallback = true;
-      weatherFetchError = "최신 예보를 불러오지 못해 평년 기후 정보를 보여드리고 있어요.";
-    }
-
-    // 3. Formulate Prompt for Gemini
-    // We always pass the fetched weatherData (live, medium, or climate average) to ensure perfect consistency.
-    const isClimate = weatherData?.weatherDataType === "climate_average";
-    const isPast = weatherData?.weatherDataType === "past_observation";
-    const prompt = `You are an expert travel coordinator. Analyze the city or region named "${name}" in "${country || 'unknown country'}" for the travel window "${startDate}" to "${endDate}".
-Place ID: ${placeId}
-Coordinates: (${latVal}, ${longitude})
-
-We have already fetched the ${isClimate ? "historical climate average" : (isPast ? "historical actual past observation" : "actual physically verified weather forecast")} for this period.
-Here is the weather JSON data:
-${JSON.stringify(weatherData, null, 2)}
-
-CRITICAL MANDATE:
-- Utilize this weather data to customize your overall summary, recommendations, and packing lists.
-- Keep the overall recommendationScore fully in sync with the weather conditions (e.g., lower score if extreme rain or heat wave).
-- "전 세계 축제 데이터를 모두 지원한다"와 같이 과장하거나 거짓 정보를 생성해서는 안 됩니다.
-- 실제 공신력 있는 데이터가 존재할 경우에만 축제(festivals) 리스트에 포함하세요.
-- 만약 해당 지역 및 기간에 실제 열리는 주요 축제가 없다면 빈 배열 \`[]\`을 반환해야 합니다. 절대 허구의 축제나 부정확한 축제 일정을 임의로 꾸며내어 생성(Hallucination)하지 마십시오.
-${isClimate ? `- CLIMATE AVERAGE PHRASING MANDATE: This trip is 17+ days away, so the data is HISTORICAL CLIMATE AVERAGE. You MUST NEVER use deterministic daily weather claims such as "7월 24일에 비가 옵니다" or "7월 22일 이슬비". Instead, you MUST use phrasing like "이 시기에는 일반적으로...", "평년에는...", "과거 평균적으로..."` : (isPast ? `- PAST OBSERVATION PHRASING MANDATE: The trip date has passed. Use phrasing like "지난 여행 기간 관측된 날씨는..."` : `- FORECAST PHRASING MANDATE: Use phrasing like "이번 여행에서는..."`)}
-
-Provide the exact tourist congestion level (low, medium, high with details), national public holidays, and a cohesive travel summary.
-In your response, return the 'weather' property containing exactly the weather data provided above.`;
-
-    // Build Schema for Gemini Response
-    const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        weather: {
-          type: Type.OBJECT,
-          properties: {
-            weatherDataType: { type: Type.STRING, description: "Must be 'climate_average', 'medium_term_forecast', 'short_term_forecast', or 'live_conditions'" },
-            averageTemp: { type: Type.NUMBER },
-            humidity: { type: Type.NUMBER },
-            averageTempMax: { type: Type.NUMBER },
-            averageTempMin: { type: Type.NUMBER },
-            averageTempMean: { type: Type.NUMBER },
-            tempMaxRange: { type: Type.STRING },
-            tempMinRange: { type: Type.STRING },
-            apparentMax: { type: Type.STRING },
-            overallTempMax: { type: Type.NUMBER },
-            overallTempMin: { type: Type.NUMBER },
-            heatWaveDays: { type: Type.NUMBER },
-            humidityRange: { type: Type.STRING },
-            averageHumidity: { type: Type.NUMBER },
-            apparentSensoryStatus: { type: Type.STRING },
-            precipDays: { type: Type.NUMBER },
-            maxPrecipProb: { type: Type.NUMBER },
-            totalPrecipitation: { type: Type.NUMBER },
-            precipType: { type: Type.STRING },
-            description: { type: Type.STRING },
-            descriptionEn: { type: Type.STRING },
-            rainySeason: { type: Type.STRING },
-            rainySeasonEn: { type: Type.STRING },
-            dailyForecasts: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  date: { type: Type.STRING },
-                  displayDate: { type: Type.STRING },
-                  tempMax: { type: Type.NUMBER },
-                  tempMin: { type: Type.NUMBER },
-                  apparentMax: { type: Type.NUMBER },
-                  apparentMin: { type: Type.NUMBER },
-                  precipSum: { type: Type.NUMBER },
-                  precipProb: { type: Type.NUMBER },
-                  weatherStatus: { type: Type.STRING },
-                  weatherIcon: { type: Type.STRING },
-                  averageHumidity: { type: Type.NUMBER },
-                  humidityRange: { type: Type.STRING },
-                  sensoryStatus: { type: Type.STRING }
-                },
-                required: ["date", "displayDate", "tempMax", "tempMin", "apparentMax", "apparentMin", "precipSum", "precipProb", "weatherStatus", "weatherIcon", "averageHumidity", "humidityRange", "sensoryStatus"]
-              }
-            }
-          },
-          required: [
-            "weatherDataType", "averageTemp", "humidity", "averageTempMax", "averageTempMin", "averageTempMean",
-            "tempMaxRange", "tempMinRange", "apparentMax", "overallTempMax", "overallTempMin", "heatWaveDays",
-            "humidityRange", "averageHumidity", "apparentSensoryStatus", "precipDays", "maxPrecipProb",
-            "totalPrecipitation", "precipType", "description", "descriptionEn", "rainySeason", "rainySeasonEn", "dailyForecasts"
-          ]
-        },
-        congestion: {
-          type: Type.OBJECT,
-          properties: {
-            level: { type: Type.STRING, description: "Tourist congestion level: 'low', 'medium', or 'high'" },
-            description: { type: Type.STRING, description: "Korean description of tourist density" },
-            descriptionEn: { type: Type.STRING, description: "English description of tourist density" }
-          },
-          required: ["level", "description", "descriptionEn"]
-        },
-        holidays: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              name: { type: Type.STRING },
-              nameEn: { type: Type.STRING },
-              date: { type: Type.STRING }
-            },
-            required: ["name", "nameEn", "date"]
-          }
-        },
-        festivals: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              name: { type: Type.STRING },
-              nameEn: { type: Type.STRING },
-              startDate: { type: Type.STRING },
-              endDate: { type: Type.STRING },
-              description: { type: Type.STRING },
-              descriptionEn: { type: Type.STRING },
-              isRepresentative: { type: Type.BOOLEAN },
-              location: { type: Type.STRING },
-              recommendationScore: { type: Type.NUMBER }
-            },
-            required: ["name", "nameEn", "startDate", "endDate", "description", "descriptionEn", "isRepresentative", "location", "recommendationScore"]
-          }
-        },
-        summary: { type: Type.STRING },
-        summaryEn: { type: Type.STRING },
-        recommendationScore: { type: Type.NUMBER }
-      },
-      required: ["weather", "congestion", "holidays", "festivals", "summary", "summaryEn", "recommendationScore"]
-    };
-
-    let parsedData: any = {
-      weather: weatherData,
-      congestion: {
-        level: "medium",
-        description: "관광객 밀집도 정보는 가져오지 못했습니다.",
-        descriptionEn: "Could not retrieve tourist density info."
-      },
-      holidays: [],
-      festivals: [],
-      summary: "AI가 여행 분석 요약을 작성하지 못했습니다. 하지만 아래에서 실시간 날씨, 공휴일, 축제 데이터는 정상적으로 확인하실 수 있습니다.",
-      summaryEn: "AI failed to generate travel summary. However, you can still view real-time weather, public holidays, and festivals below.",
-      recommendationScore: 80,
-      aiGenerationFailed: true
-    };
-
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.6-flash",
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json",
-          responseSchema: responseSchema
-        }
+      }, ai).then(res => {
+        validateCoordinatesAndTimezone(name, finalCountryCode, latVal, lngVal, startDate, targetTimezone);
+        return res;
+      }).catch(fErr => {
+        console.warn(`[Forecast Fetch Failed] Falling back to climate average gracefully: ${fErr.message}`);
+        isErrorFallback = true;
+        weatherFetchError = "최신 예보를 불러오지 못해 평년 기후 정보를 보여드리고 있어요.";
+        return null;
       });
 
-      const resultText = response.text;
-      if (resultText) {
-        parsedData = JSON.parse(resultText.trim());
-        parsedData.aiGenerationFailed = false;
-      }
-    } catch (geminiErr: any) {
-      console.error("[Gemini AI Generation Failed]", geminiErr.message);
-      parsedData.aiGenerationFailed = true;
-    }
+      const countryCodeClean = finalCountryCode;
+      const [weatherDataRes, holidayRes, eventRes] = await Promise.all([
+        weatherPromise,
+        fetchPublicHolidays(countryCodeClean, startDate, endDate).catch(e => { console.error("[Holiday API Error]", e); return { provider: "Fallback", status: "error", rawCount: 0, normalizedCount: 0, filteredCount: 0, items: [] }; }),
+        fetchEventsAndFestivals({
+          cityName: name,
+          countryCode: countryCodeClean,
+          startDate,
+          endDate,
+          ai,
+          cityId: placeId,
+          cacheId,
+          cacheHit: false
+        }).catch(e => { console.error("[Event API Error]", e); return { provider: "Fallback", rawCount: 0, normalizedCount: 0, dateFilteredCount: 0, locationFilteredCount: 0, categoryFilteredCount: 0, festivals: [], publicEvents: [], industryEvents: [], events: [], status: "error" }; })
+      ]);
 
-    const countryCodeClean = finalCountryCode;
-    const [holidayRes, eventRes] = await Promise.all([
-      fetchPublicHolidays(countryCodeClean, startDate, endDate),
-      fetchEventsAndFestivals({
-        cityName: name,
-        countryCode: countryCodeClean,
-        startDate,
-        endDate,
-        ai,
-        cityId: placeId,
-        cacheId,
-        cacheHit: false
-      })
-    ]);
+      weatherData = weatherDataRes;
+
+      let parsedData: any = {
+        weather: weatherData,
+        congestion: {
+          level: "medium",
+          description: "관광객 밀집도 정보는 가져오지 못했습니다.",
+          descriptionEn: "Could not retrieve tourist density info."
+        },
+        holidays: [],
+        festivals: [],
+        summary: "AI가 여행 분석 요약을 작성하지 못했습니다. 하지만 아래에서 실시간 날씨, 공휴일, 축제 데이터는 정상적으로 확인하실 수 있습니다.",
+        summaryEn: "AI failed to generate travel summary. However, you can still view real-time weather, public holidays, and festivals below.",
+        recommendationScore: 80,
+        aiGenerationFailed: false
+      };
+
+
 
       // Standardized meta and collection wrappers
       const metaObj = {
-        apiVersion: "destination-analysis-v4",
+        apiVersion: "destination-analysis-v5",
         eventCacheVersion: "events-v3",
         serverBuildId: "trippo-build-2026-08-04-v2",
         serverStartedAt: SERVER_STARTED_AT
@@ -5076,7 +5866,11 @@ In your response, return the 'weather' property containing exactly the weather d
         congestionLevel: parsedData.congestion?.level || "medium"
       });
 
-      const suitabilityReport = await generateAIReportWithGemini(evidenceBundle, ai);
+      const suitabilityReport = await generateAIReportWithGemini(evidenceBundle, ai, {
+        onAbort: () => { firestoreMetrics.geminiClientAbortCount++; },
+        onTimeout: () => { firestoreMetrics.geminiTimeoutFallbackCount++; },
+        onLateResponse: () => { firestoreMetrics.geminiLateResponseIgnoredCount++; }
+      });
       parsedData.recommendationScore = suitabilityReport.totalScore;
 
       const queryRangeDays = Math.ceil(DateTime.fromISO(endDate).diff(DateTime.fromISO(startDate), "days").days);
@@ -5117,6 +5911,12 @@ In your response, return the 'weather' property containing exactly the weather d
       res.setHeader("Pragma", "no-cache");
       res.setHeader("Expires", "0");
 
+      const statusInfo = determineDegradedStatus(
+        !!isErrorFallback,
+        holidayRes.status,
+        eventRes.status
+      );
+
       // Persist results to Firestore for caching and fast retrieval
       const payload = {
         id: cacheId,
@@ -5127,13 +5927,16 @@ In your response, return the 'weather' property containing exactly the weather d
         createdAt: Date.now(),
         cacheVersion: "events-v3",
         meta: metaObj,
-        weather: parsedData.weather,
+        status: statusInfo.status,
+        degradedDetails: statusInfo.degradedDetails,
+        sources: statusInfo.sources,
+        weather: weatherData,
         congestion: parsedData.congestion,
         holidays: holidayObj,
         festivals: festivalObj,
         events: eventObj,
-        publicEvents: parsedData.publicEvents,
-        industryEvents: parsedData.industryEvents,
+        publicEvents: publicEventsObj,
+        industryEvents: industryEventsObj,
         holidayStatus: holidayRes.status,
         festivalStatus: eventRes.status,
         summary: suitabilityReport.overallConclusion,
@@ -5182,7 +5985,7 @@ In your response, return the 'weather' property containing exactly the weather d
       
       const countryCodeClean = country || (name.toLowerCase().includes("tokyo") ? "JP" : "unknown");
       const [holidayRes, eventRes] = await Promise.all([
-        fetchPublicHolidays(countryCodeClean, startDate, endDate),
+        fetchPublicHolidays(countryCodeClean, startDate, endDate).catch(e => { console.error("[Holiday API Error]", e); return { provider: "Fallback", status: "error", rawCount: 0, normalizedCount: 0, filteredCount: 0, items: [] }; }),
         fetchEventsAndFestivals({
           cityName: name,
           countryCode: countryCodeClean,
@@ -5192,7 +5995,7 @@ In your response, return the 'weather' property containing exactly the weather d
           cityId: placeId,
           cacheId,
           cacheHit: false
-        })
+        }).catch(e => { console.error("[Event API Error]", e); return { provider: "Fallback", rawCount: 0, normalizedCount: 0, dateFilteredCount: 0, locationFilteredCount: 0, categoryFilteredCount: 0, festivals: [], publicEvents: [], industryEvents: [], events: [], status: "error" }; })
       ]);
 
       const metaObj = {
@@ -5296,6 +6099,12 @@ In your response, return the 'weather' property containing exactly the weather d
       fallbackPayload.summary = suitabilityReport.overallConclusion;
       fallbackPayload.summaryEn = suitabilityReport.overallConclusionEn;
 
+      const statusInfo = determineDegradedStatus(
+        !!isErrorFallback,
+        holidayRes.status,
+        eventRes.status
+      );
+
       const payload = {
         id: cacheId,
         placeId,
@@ -5304,6 +6113,9 @@ In your response, return the 'weather' property containing exactly the weather d
         countryCode: countryCodeClean,
         createdAt: Date.now(),
         cacheVersion: "events-v3",
+        status: statusInfo.status,
+        degradedDetails: statusInfo.degradedDetails,
+        sources: statusInfo.sources,
         ...fallbackPayload
       };
 
@@ -5318,7 +6130,26 @@ In your response, return the 'weather' property containing exactly the weather d
       res.setHeader("Pragma", "no-cache");
       res.setHeader("Expires", "0");
 
+      const elapsedMs = Date.now() - reqStartTime;
+      console.log(`[EXPLORE_RESPONSE_SENT] requestId: ${requestId}, placeId: ${placeId}, name: ${name}, statusCode: 200, elapsedMs: ${elapsedMs}ms`);
+
       return res.json({ ...payload, isCached: false });
+    }
+  } catch (outerErr: any) {
+      const elapsedMs = Date.now() - reqStartTime;
+      console.error(`[EXPLORE_REQUEST_ERROR] requestId: ${requestId}, elapsedMs: ${elapsedMs}ms, error: ${outerErr?.message || outerErr}`);
+      
+      const errorMessage = outerErr?.message || "";
+      const isUnavailable = errorMessage.includes("unavailable") || 
+                            errorMessage.includes("OPEN") || 
+                            errorMessage.includes("timeout") ||
+                            outerErr?.code === "unavailable";
+      const statusCode = isUnavailable ? 503 : 500;
+
+      return res.status(statusCode).json({
+        error: isUnavailable ? "SERVICE_UNAVAILABLE" : "EXPLORE_ANALYSIS_FAILED",
+        message: outerErr?.message || "Internal server error during destination analysis."
+      });
     }
   });
 
@@ -5798,6 +6629,587 @@ In your response, return the 'weather' property containing exactly the weather d
       console.error("Timezone resolver exception:", error.message);
       return res.status(500).json({ error: "Internal Server Error" });
     }
+  });
+
+  // State for Firestore partial synchronization and short TTL empty caches
+  const lastPrefixedSyncTime = new Map<string, number>(); // Normalized query -> timestamp
+  const emptyQueryCache = new Map<string, number>(); // Query string -> timestamp
+
+  async function syncDestinationsFromFirestore(normalizedQuery: string) {
+    if (!normalizedQuery || normalizedQuery.length < 2) {
+      return;
+    }
+    const now = Date.now();
+    const lastSync = lastPrefixedSyncTime.get(normalizedQuery) || 0;
+    if (now - lastSync < 3000) {
+      // 3 seconds TTL cache hit
+      return;
+    }
+    try {
+      if (!webDb) {
+        console.warn("[FIRESTORE_SYNC_WARNING] Firestore database is not initialized. Skipping prefix-based sync.");
+        return;
+      }
+      
+      const cb = nonCriticalCircuitBreaker;
+      if (!cb.allowRequest()) {
+        console.warn("[FIRESTORE_SYNC_WARNING] Circuit breaker is OPEN. Skipping prefix-based sync.");
+        return;
+      }
+
+      const colRef = webCollection(webDb, "destinations");
+      const qRef = webQuery(colRef, webWhere("prefixes", "array-contains", normalizedQuery), webLimit(20));
+      
+      const snap = await webGetDocsWithTimeout(qRef, 500);
+      cb.recordSuccess();
+
+      let count = 0;
+      snap.forEach((docSnap: any) => {
+        const dest = docSnap.data();
+        if (dest && dest.id) {
+          upsertRuntimeDestination(dest as any);
+          count++;
+        }
+      });
+      lastPrefixedSyncTime.set(normalizedQuery, now);
+      console.log(`[FIRESTORE_SYNC_SUCCESS] Prefix index query "${normalizedQuery}" returned ${count} documents from Firestore.`);
+    } catch (err: any) {
+      nonCriticalCircuitBreaker.recordFailure();
+      console.error(`[FIRESTORE_SYNC_ERROR] Prefix index query "${normalizedQuery}" failed:`, err.message);
+    }
+  }
+
+  // Rate limiting tracker for administrative clear endpoint
+  let adminClearTimestamps: number[] = [];
+
+  // Admin Cleaner Endpoint to reset database state for E2E testing
+  if (process.env.NODE_ENV !== "production") {
+    app.post('/app-api/destinations/admin-clear', async (req, res) => {
+    try {
+      // 1. Verify non-production environment
+      if (process.env.NODE_ENV === "production") {
+        return res.status(403).json({ error: "Administrative reset is forbidden in production environments" });
+      }
+
+      // 2. Authorization check
+      const authHeader = req.headers.authorization;
+      const expectedSecret = process.env.ADMIN_CLEAR_SECRET || "trippo-admin-bypass-key-2026";
+      if (!authHeader || !authHeader.startsWith("Bearer ") || authHeader.slice(7) !== expectedSecret) {
+        return res.status(401).json({ error: "Unauthorized admin access" });
+      }
+
+      // 3. Confirm parameter validation
+      const confirmArg = req.body.confirm_clear_all_data === true || req.query.confirm_clear_all_data === "true";
+      if (!confirmArg) {
+        return res.status(400).json({ error: "Missing confirmation parameter 'confirm_clear_all_data': true" });
+      }
+
+      // 4. Rate Limiting (maximum 3 calls per 60 seconds)
+      const now = Date.now();
+      adminClearTimestamps = adminClearTimestamps.filter(ts => now - ts < 60000);
+      if (adminClearTimestamps.length >= 3) {
+        return res.status(429).json({ error: "Rate limit exceeded. Maximum 3 resets per minute." });
+      }
+      adminClearTimestamps.push(now);
+
+      const destinationId = String(req.body.destinationId || req.query.destinationId || '').trim();
+      if (!destinationId) {
+        return res.status(400).json({ error: "Missing destinationId" });
+      }
+
+      console.log(`[ADMIN_CLEAR] Starting database reset for "${destinationId}"...`);
+
+      // 5. Delete from runtime destination store & Google mapping cache
+      deleteRuntimeDestination(destinationId);
+      // Also delete from Google Place ID mapping store
+      for (const [key, val] of googlePlaceIdMappingStore.entries()) {
+        if (val === destinationId) {
+          googlePlaceIdMappingStore.delete(key);
+        }
+      }
+
+      // 6. Clear empty query cache & prefix sync caches
+      emptyQueryCache.clear();
+      lastPrefixedSyncTime.clear();
+
+      // 7. Delete from Firestore 'destinations' collection
+      if (webDb) {
+        const docRef = webDoc(webDb, "destinations", destinationId);
+        await webDeleteDoc(docRef);
+        console.log(`[ADMIN_CLEAR] Deleted document "${destinationId}" from Firestore 'destinations' collection.`);
+      } else {
+        console.warn(`[ADMIN_CLEAR_WARNING] webDb not initialized. Cannot delete from Firestore.`);
+      }
+
+      return res.json({ status: "success", cleared: destinationId });
+    } catch (err: any) {
+      console.error(`[ADMIN_CLEAR_ERROR] Failed to clear:`, err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+  }
+
+  // Hybrid Destination Autocomplete Endpoint
+  app.get('/app-api/destinations/autocomplete', async (req, res) => {
+    try {
+      const q = String(req.query.q || req.query.query || '').trim();
+      const language = (req.query.language as 'ko' | 'en') || 'ko';
+      const limit = Math.min(Number(req.query.limit) || 8, 20);
+      const sessionToken = String(req.query.sessionToken || '');
+      const normalizedQ = normalizeSearchText(q);
+
+      // Always pull dynamic updates from Firestore using prefix-based index query
+      if (normalizedQ.length >= 2) {
+        await syncDestinationsFromFirestore(normalizedQ);
+      }
+
+      // Check for CJK vs non-CJK languages
+      const isCjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/i.test(q);
+      const minExternalLength = isCjk ? 2 : 3;
+      const isExplicitSearch = req.query.explicit === 'true';
+      const isImeComposing = req.query.isImeComposing === 'true';
+
+      // Extract country hint to calculate correct cache key
+      let preCountryHint: string | null = null;
+      if (/일본|japan|\bjp\b/i.test(q)) {
+        preCountryHint = 'JP';
+      } else if (/한국|korea|\bkr\b/i.test(q)) {
+        preCountryHint = 'KR';
+      } else if (/프랑스|france|\bfr\b/i.test(q)) {
+        preCountryHint = 'FR';
+      } else if (/필리핀|philippines|\bph\b/i.test(q)) {
+        preCountryHint = 'PH';
+      } else if (/인도네시아|indonesia|\bid\b/i.test(q)) {
+        preCountryHint = 'ID';
+      }
+
+      const cacheKey = `${normalizedQ}:${language}:${preCountryHint || 'none'}:v1`;
+
+      // 1. Length-based behavior:
+      // 0 chars: return popular/recent internal items only (do NOT include in fallback or search counts)
+      if (q.length === 0) {
+        const internalItems = searchInternalDestinations('', limit, language);
+        return res.json({
+          query: q,
+          status: 'success',
+          items: internalItems,
+          meta: { internalCount: internalItems.length, externalCount: 0, cacheHit: true }
+        });
+      }
+
+      // Check if this query is cached as returning empty within 5 seconds TTL
+      const cachedEmptyTime = emptyQueryCache.get(cacheKey);
+      if (cachedEmptyTime && Date.now() - cachedEmptyTime < 5000) {
+        console.log(`[NEGATIVE_CACHE_HIT] Query "${q}" hit negative cache. Key: ${cacheKey}`);
+
+        console.log(`[DESTINATION_AUTOCOMPLETE_TRACE]\n` +
+          `- rawQuery: "${q}"\n` +
+          `- normalizedQuery: "${normalizedQ}"\n` +
+          `- queryCodePointLength: ${[...normalizedQ].length}\n` +
+          `- isImeComposing: ${req.query.isImeComposing === 'true'}\n` +
+          `- language: "${language}"\n` +
+          `- previousCountryHint: ${req.query.previousCountryHint ? `"${req.query.previousCountryHint}"` : 'null'}\n` +
+          `- effectiveCountryHint: ${preCountryHint ? `"${preCountryHint}"` : 'null'}\n` +
+          `- includedRegionCodes: ${preCountryHint ? JSON.stringify([preCountryHint.toLowerCase()]) : 'null'}\n` +
+          `- locationBias: null\n` +
+          `- locationRestriction: null\n\n` +
+          `- internalSearchExecuted: false\n` +
+          `- internalRawCount: 0\n` +
+          `- relevantInternalCount: 0\n` +
+          `- negativeCacheHit: true\n\n` +
+          `- externalEligibility: false\n` +
+          `- externalMinQueryLength: ${minExternalLength}\n` +
+          `- externalSearchExecuted: false\n` +
+          `- externalRequestPayload: null\n` +
+          `- externalHttpStatus: null\n` +
+          `- externalRawPredictionCount: 0\n` +
+          `- externalFilteredCount: 0\n` +
+          `- externalFailCode: null\n\n` +
+          `- finalStatus: "empty_verified"\n` +
+          `- finalResultCount: 0\n` +
+          `- emptyCacheWritten: false\n`
+        );
+
+        return res.json({
+          query: q,
+          status: 'empty_verified',
+          items: [],
+          meta: { internalCount: 0, externalCount: 0, cacheHit: true }
+        });
+      }
+
+      // 2+ chars: Search internal DB first
+      const internalItems = searchInternalDestinations(q, limit, language);
+
+      // Filter to ensure relevance verification via rank > 0 check
+      const relevantInternalResults = internalItems.filter((item) => {
+        if (!item.rawDestination) return false;
+        return calculateDestinationSearchRank(item.rawDestination, q, language) > 0;
+      });
+      const strongInternalResults = internalItems.filter((item) => item.matchCategory === 'strong');
+
+      // Exact Match check
+      const normalizedQuery = q.trim().toLowerCase().replace(/\s+/g, '');
+      const hasExactMatch = internalItems.some(item => {
+        const namesList = [
+          item.names?.ko,
+          item.names?.en,
+          item.names?.local,
+          item.displayName,
+          item.names?.displayKo,
+          item.names?.displayEn,
+          item.names?.officialKo,
+          item.names?.officialEn
+        ];
+        return namesList.some(name => {
+          if (!name) return false;
+          return name.trim().toLowerCase().replace(/\s+/g, '') === normalizedQuery;
+        });
+      });
+
+      // Complete Coverage check
+      const groupedInternal = groupAndDeduplicateDestinations(internalItems, q);
+      const hasCompleteGrouping = groupedInternal.some(item => {
+        if (!item.isGroup) return false;
+        const types = new Set<string>();
+        if (item.recommendedItem?.type) types.add(item.recommendedItem.type);
+        if (item.alternatives) {
+          item.alternatives.forEach(alt => {
+            if (alt.type) types.add(alt.type);
+          });
+        }
+        return types.has('city') && types.has('island');
+      });
+
+      const fallbackBlocker = hasExactMatch || hasCompleteGrouping;
+
+      // 1. Search Source Priority:
+      // If strongInternalResults.length > 0 AND fallbackBlocker is true:
+      // Return internal results immediately without Google Places API search
+      if (fallbackBlocker && strongInternalResults.length > 0) {
+        console.log(`[SEARCH_SOURCE_PRIORITY] Complete internal match/coverage found for "${q}". Skipping Google Places API.`);
+        return res.json({
+          query: q,
+          status: 'results_internal',
+          items: internalItems,
+          meta: {
+            internalCount: internalItems.length,
+            externalCount: 0,
+            cacheHit: true
+          }
+        });
+      }
+
+      // No strong internal results or ambiguous coverage: fallback to Google Places API
+      const traceObj = {
+        externalSearchExecuted: false,
+        effectiveCountryHint: null as string | null,
+        includedRegionCodes: null as string[] | null,
+        externalRequestPayload: null as any,
+        externalHttpStatus: null as number | null,
+        externalRawPredictionCount: 0,
+        externalFilteredCount: 0,
+        externalFailCode: null as string | null
+      };
+
+      const externalEligibility = (!fallbackBlocker) && (q.length >= minExternalLength);
+
+      let externalItems: any[] = [];
+      let finalStatus: 'results_internal' | 'results_external' | 'empty_verified' | 'unsupported_type' | 'external_error' = 'results_internal';
+
+      if (externalEligibility) {
+        const apiKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GEMINI_API_KEY;
+        const rawExternal = await searchExternalDestinations(q, 5, language, apiKey, sessionToken, traceObj);
+
+        // Deduplicate external candidates against internal items
+        externalItems = rawExternal.filter(
+          (ext) => !internalItems.some((int) => isDuplicateDestination(int, ext))
+        );
+
+        if (traceObj.externalFailCode) {
+          finalStatus = 'external_error';
+        } else if (externalItems.length > 0) {
+          finalStatus = 'results_external';
+        } else if (traceObj.externalRawPredictionCount > 0 && traceObj.externalFilteredCount === 0) {
+          finalStatus = 'unsupported_type';
+        } else {
+          finalStatus = 'empty_verified';
+        }
+      } else {
+        // Not eligible for external search, fall back to whatever internal items we have
+        finalStatus = 'results_internal';
+      }
+
+      let combined = [...internalItems, ...externalItems];
+      combined = groupAndDeduplicateDestinations(combined, q).slice(0, limit);
+
+      let emptyCacheWritten = false;
+
+      // Negative Cache condition check:
+      // Google API success AND supported prediction count === 0
+      if (
+        traceObj.externalSearchExecuted &&
+        !traceObj.externalFailCode &&
+        traceObj.externalRawPredictionCount === 0 &&
+        strongInternalResults.length === 0 &&
+        combined.length === 0
+      ) {
+        emptyQueryCache.set(cacheKey, Date.now());
+        emptyCacheWritten = true;
+      }
+
+      // Log [DESTINATION_AUTOCOMPLETE_TRACE]
+      console.log(`[DESTINATION_AUTOCOMPLETE_TRACE]\n` +
+        `- rawQuery: "${q}"\n` +
+        `- normalizedQuery: "${normalizedQ}"\n` +
+        `- queryCodePointLength: ${[...normalizedQ].length}\n` +
+        `- isImeComposing: ${req.query.isImeComposing === 'true'}\n` +
+        `- language: "${language}"\n` +
+        `- previousCountryHint: ${req.query.previousCountryHint ? `"${req.query.previousCountryHint}"` : 'null'}\n` +
+        `- effectiveCountryHint: ${traceObj.effectiveCountryHint ? `"${traceObj.effectiveCountryHint}"` : 'null'}\n` +
+        `- includedRegionCodes: ${traceObj.includedRegionCodes ? JSON.stringify(traceObj.includedRegionCodes) : 'null'}\n` +
+        `- locationBias: null\n` +
+        `- locationRestriction: null\n\n` +
+        `- internalSearchExecuted: true\n` +
+        `- internalRawCount: ${internalItems.length}\n` +
+        `- relevantInternalCount: ${relevantInternalResults.length}\n` +
+        `- negativeCacheHit: false\n\n` +
+        `- externalEligibility: ${externalEligibility}\n` +
+        `- externalMinQueryLength: ${minExternalLength}\n` +
+        `- externalSearchExecuted: ${traceObj.externalSearchExecuted}\n` +
+        `- externalRequestPayload: ${traceObj.externalRequestPayload ? JSON.stringify(traceObj.externalRequestPayload) : 'null'}\n` +
+        `- externalHttpStatus: ${traceObj.externalHttpStatus}\n` +
+        `- externalRawPredictionCount: ${traceObj.externalRawPredictionCount}\n` +
+        `- externalFilteredCount: ${traceObj.externalFilteredCount}\n` +
+        `- externalFailCode: ${traceObj.externalFailCode ? `"${traceObj.externalFailCode}"` : 'null'}\n\n` +
+        `- finalStatus: "${finalStatus}"\n` +
+        `- finalResultCount: ${combined.length}\n` +
+        `- emptyCacheWritten: ${emptyCacheWritten}\n`
+      );
+
+      return res.json({
+        query: q,
+        status: finalStatus,
+        items: combined,
+        meta: {
+          internalCount: internalItems.length,
+          externalCount: externalItems.length,
+          cacheHit: false
+        }
+      });
+    } catch (err: any) {
+      console.error('[Autocomplete API Error]', err.message);
+      return res.status(500).json({
+        query: req.query.q || '',
+        status: 'error',
+        items: [],
+        message: 'Destination autocomplete failed.',
+        meta: { internalCount: 0, externalCount: 0, cacheHit: false }
+      });
+    }
+  });
+
+  // Resolve external Place ID / candidate into normalized Destination
+  app.post('/app-api/destinations/resolve', async (req, res) => {
+    try {
+      const { provider = 'google', externalId, language = 'ko', pendingAlias } = req.body;
+      if (!externalId) {
+        return res.status(400).json({ error: 'externalId is required' });
+      }
+
+      if (!webDb) {
+        throw new Error('Firestore not initialized');
+      }
+
+      // 1. Google Place ID 매핑 문서 조회
+      const encodedPlaceId = Buffer.from(externalId).toString('base64').replace(/[/+=]/g, '');
+      const mappingDocRef = webDoc(webDb, 'destinationProviderMappings', `google_${encodedPlaceId}`);
+      
+      let mappingSnap: any;
+      try {
+        mappingSnap = await webGetDocWithTimeout(mappingDocRef, 1500);
+      } catch (err: any) {
+        console.warn(`[Resolve Mapping Warning] Mapping lookup timed out/failed:`, err.message);
+      }
+
+      if (mappingSnap && mappingSnap.exists()) {
+        const mappingData = mappingSnap.data();
+        if (mappingData.destinationId) {
+          const destRef = webDoc(webDb, 'destinations', mappingData.destinationId);
+          let destSnap: any;
+          try {
+            destSnap = await webGetDocWithTimeout(destRef, 1500);
+          } catch (err: any) {
+            console.warn(`[Resolve Dest Warning] Destination lookup timed out/failed:`, err.message);
+          }
+          if (destSnap && destSnap.exists()) {
+             const existingData = destSnap.data() as any;
+             if (existingData?.names?.ko !== '여행지' && !existingData?.id?.endsWith('-여행지')) {
+               // 2. 존재하면 연결된 기존 Destination 반환
+               console.log(`[RESOLVE_MAPPING_HIT] Found existing mapping for ${externalId} -> ${mappingData.destinationId}`);
+               upsertRuntimeDestination(existingData);
+               return res.json({ status: 'resolved', destination: existingData });
+             }
+          }
+        }
+      }
+
+      // 3. 없으면 canonical Destination 후보 조회
+      const apiKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GEMINI_API_KEY;
+      const destination = await resolveDestinationDetails({
+        provider,
+        externalId,
+        language: language as 'ko' | 'en',
+        googleApiKey: apiKey,
+        pendingAlias,
+        skipCache: true
+      });
+
+      // 4. Firestore transaction 시작
+      let finalizedDestination = destination;
+      try {
+        const docRef = webDoc(webDb, 'destinations', destination.id);
+        
+        finalizedDestination = await webRunTransaction(webDb, async (transaction) => {
+          // Check mapping again inside transaction just in case of race condition (인스턴스 A와 B 동시 resolve)
+          // Parallelize the reads for txMappingSnap and docSnap
+          const [txMappingSnap, docSnap] = await Promise.all([
+            transaction.get(mappingDocRef),
+            transaction.get(docRef)
+          ]);
+          
+          if (txMappingSnap.exists()) {
+            const txMappingData = txMappingSnap.data();
+            const existingDestRef = webDoc(webDb, 'destinations', txMappingData.destinationId);
+            const existingDestSnap = await transaction.get(existingDestRef);
+            if (existingDestSnap.exists()) {
+              const existingData = existingDestSnap.data() as any;
+              if (existingData?.names?.ko !== '여행지' && !existingData?.id?.endsWith('-여행지')) {
+                return existingData;
+              }
+            }
+          }
+
+          let merged: any;
+          if (!docSnap.exists()) {
+            merged = destination;
+            transaction.set(docRef, destination);
+          } else {
+            // 5. Destination 문서 생성 또는 병합
+            const existing = docSnap.data() as any;
+
+            const mergedAliasesKo = Array.from(new Set([
+              ...(existing.aliases?.ko || []),
+              ...(destination.aliases?.ko || [])
+            ].filter(Boolean)));
+
+            const mergedAliasesEn = Array.from(new Set([
+              ...(existing.aliases?.en || []),
+              ...(destination.aliases?.en || [])
+            ].filter(Boolean)));
+
+            const mergedPendingAliases = Array.from(new Set([
+              ...(existing.pendingAliases || []),
+              ...(destination.pendingAliases || [])
+            ].filter(Boolean)));
+
+            const mergedMetaMap = new Map<string, any>();
+            (existing.pendingAliasesMetadata || []).forEach((m: any) => mergedMetaMap.set(m.alias, m));
+            (destination.pendingAliasesMetadata || []).forEach((m: any) => {
+              const prev = mergedMetaMap.get(m.alias);
+              if (prev) {
+                mergedMetaMap.set(m.alias, {
+                  ...prev,
+                  selectionCount: (prev.selectionCount || 1) + 1,
+                  lastSelectedAt: m.lastSelectedAt
+                });
+              } else {
+                mergedMetaMap.set(m.alias, m);
+              }
+            });
+
+            const mergedMetaList = Array.from(mergedMetaMap.values());
+
+            merged = {
+              ...destination,
+              aliases: {
+                ko: mergedAliasesKo,
+                en: mergedAliasesEn,
+                local: existing.aliases?.local || [],
+              },
+              pendingAliases: mergedPendingAliases,
+              pendingAliasesMetadata: mergedMetaList,
+              createdAt: existing.createdAt || destination.createdAt,
+              updatedAt: new Date().toISOString(),
+              popularity: {
+                ...destination.popularity,
+                searchCount: (existing.popularity?.searchCount || 0) + 1,
+                recentSearchCount: (existing.popularity?.recentSearchCount || 0) + 1
+              }
+            };
+
+            transaction.set(docRef, merged);
+          }
+
+          // 6. Provider Mapping 문서 생성
+          transaction.set(mappingDocRef, {
+            provider: 'google',
+            providerPlaceId: externalId,
+            destinationId: merged.id,
+            createdAt: merged.createdAt || new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+
+          return merged;
+        });
+
+        // 8. 메모리 매핑은 성능 캐시로만 갱신
+        upsertRuntimeDestination(finalizedDestination);
+        
+        console.log(`[RESOLVE_TRANSACTION_SUCCESS] Atomic merge & mapping completed for: ${finalizedDestination.id}`);
+        enqueueDestinationEnrichment(webDb, finalizedDestination.id);
+      } catch (fErr: any) {
+        console.error('[Firestore Transaction Error] Atomic transaction failed:', fErr.message);
+        throw fErr;
+      }
+
+      // Invalidate empty cache entries for this resolved destination (and all its names/aliases/prefixes)
+      const termsToClear = [
+        finalizedDestination.names?.ko,
+        finalizedDestination.names?.en,
+        ...(finalizedDestination.aliases?.ko || []),
+        ...(finalizedDestination.aliases?.en || []),
+        ...(finalizedDestination.prefixes || [])
+      ].map(t => normalizeSearchText(t)).filter(Boolean);
+
+      const clearedKeys: string[] = [];
+      for (const key of emptyQueryCache.keys()) {
+        const keyQuery = key.split(':')[0];
+        if (termsToClear.some((term: string) => keyQuery === term || term.startsWith(keyQuery) || keyQuery.startsWith(term))) {
+          emptyQueryCache.delete(key);
+          clearedKeys.push(key);
+        }
+      }
+
+      lastPrefixedSyncTime.clear();
+      console.log(`[RESOLVE_CACHE_INVALIDATION] Invalidated negative cache keys: ${JSON.stringify(clearedKeys)} for destination: ${finalizedDestination.id}.`);
+
+      return res.json({
+        status: 'resolved',
+        destination: finalizedDestination
+      });
+    } catch (err: any) {
+      console.error('[Resolve Destination Error]', err.message);
+      return res.status(500).json({ error: 'Failed to resolve destination', details: err.message });
+    }
+  });
+
+  // Catch-all 404 for unhandled API routes (ensures API requests never fall through to index.html)
+  app.use(['/app-api', '/api'], (req, res) => {
+    return res.status(404).json({
+      error: 'API_ROUTE_NOT_FOUND',
+      message: `API route not found: ${req.method} ${req.originalUrl}`
+    });
   });
 
   // Serve static files / Vite middleware

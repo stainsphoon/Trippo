@@ -1,0 +1,233 @@
+[
+  {
+    "lifecycleStatus": "active",
+    "id": "kr-gangneung",
+    "normalizedNames": [
+      "강릉시",
+      "강릉",
+      "강원특별자치도",
+      "강원특별자치도강릉시",
+      "대한민국강릉시",
+      "gangneungsi",
+      "gangneung",
+      "gangwondo",
+      "gangneungsigangwondo",
+      "gangwondogangneungsi",
+      "gangneungsisouthkorea"
+    ],
+    "pendingAliases": [],
+    "migratedAt": "2026-08-05T08:40:15.165Z",
+    "providerIds": {
+      "googlePlaceId": "ChIJWw9PleHlYTURRh09nFHGt4A"
+    },
+    "migrationVersion": "destination-schema-v4",
+    "names": {
+      "local": "강릉시",
+      "en": "Gangneung-si",
+      "ko": "강릉시",
+      "officialKo": "강릉시",
+      "displayEn": "Gangneung",
+      "officialEn": "Gangneung-si",
+      "displayKo": "강릉"
+    },
+    "updatedAt": "2026-08-05T08:02:02.008Z",
+    "type": "city",
+    "popularity": {
+      "recentSearchCount": 1,
+      "globalScore": 80,
+      "searchCount": 1
+    },
+    "status": "active",
+    "timezoneId": "Asia/Seoul",
+    "capabilities": {
+      "routes": {
+        "provider": "google_routes",
+        "status": "verified"
+      },
+      "airQuality": {
+        "provider": "default",
+        "status": "verified"
+      },
+      "festivals": {
+        "status": "verified",
+        "provider": "default"
+      },
+      "weather": {
+        "provider": "google_weather",
+        "status": "verified"
+      },
+      "holidays": {
+        "provider": "default",
+        "status": "verified"
+      }
+    },
+    "aliases": {
+      "ko": [
+        "강릉시",
+        "강릉",
+        "강원특별자치도 강릉시",
+        "대한민국 강릉시",
+        "강릉"
+      ],
+      "local": [],
+      "en": [
+        "Gangneung-si",
+        "Gangneung",
+        "Gangneung-si Gangwon-do",
+        "Gangwon-do Gangneung-si",
+        "Gangneung-si South Korea"
+      ]
+    },
+    "tokens": [
+      "강릉시",
+      "강릉",
+      "강원특별자치도",
+      "강원특별자치도강릉시",
+      "대한민국강릉시",
+      "gangneungsi",
+      "gangneung",
+      "gangwondo",
+      "gangneungsigangwondo",
+      "gangwondogangneungsi",
+      "gangneungsisouthkorea"
+    ],
+    "search": {
+      "normalizedNames": [
+        "강릉시",
+        "강릉",
+        "강원특별자치도",
+        "강원특별자치도강릉시",
+        "대한민국강릉시",
+        "gangneungsi",
+        "gangneung",
+        "gangwondo",
+        "gangneungsigangwondo",
+        "gangwondogangneungsi",
+        "gangneungsisouthkorea"
+      ],
+      "prefixes": [
+        "강",
+        "강릉",
+        "강릉시",
+        "강원",
+        "강원특",
+        "강원특별",
+        "강원특별자",
+        "강원특별자치",
+        "강원특별자치도",
+        "강원특별자치도강",
+        "강원특별자치도강릉",
+        "강원특별자치도강릉시",
+        "대",
+        "대한",
+        "대한민",
+        "대한민국",
+        "대한민국강",
+        "대한민국강릉",
+        "대한민국강릉시",
+        "g",
+        "ga",
+        "gan",
+        "gang",
+        "gangn",
+        "gangne",
+        "gangneu",
+        "gangneun",
+        "gangneung",
+        "gangneungs",
+        "gangw",
+        "gangwo",
+        "gangwon",
+        "gangwond",
+        "gangwondo",
+        "gangwondog"
+      ],
+      "tokens": [
+        "강릉시",
+        "강릉",
+        "강원특별자치도",
+        "강원특별자치도강릉시",
+        "대한민국강릉시",
+        "gangneungsi",
+        "gangneung",
+        "gangwondo",
+        "gangneungsigangwondo",
+        "gangwondogangneungsi",
+        "gangneungsisouthkorea"
+      ]
+    },
+    "sourceMetadata": {
+      "primarySource": "google",
+      "verifiedAt": "2026-08-05T08:02:02.008Z"
+    },
+    "prefixes": [
+      "강",
+      "강릉",
+      "강릉시",
+      "강원",
+      "강원특",
+      "강원특별",
+      "강원특별자",
+      "강원특별자치",
+      "강원특별자치도",
+      "강원특별자치도강",
+      "강원특별자치도강릉",
+      "강원특별자치도강릉시",
+      "대",
+      "대한",
+      "대한민",
+      "대한민국",
+      "대한민국강",
+      "대한민국강릉",
+      "대한민국강릉시",
+      "g",
+      "ga",
+      "gan",
+      "gang",
+      "gangn",
+      "gangne",
+      "gangneu",
+      "gangneun",
+      "gangneung",
+      "gangneungs",
+      "gangw",
+      "gangwo",
+      "gangwon",
+      "gangwond",
+      "gangwondo",
+      "gangwondog"
+    ],
+    "hierarchy": {
+      "countryNameEn": "South Korea",
+      "countryNameKo": "대한민국",
+      "countryCode": "KR",
+      "admin1NameEn": "Gangwon-do",
+      "admin2NameKo": "",
+      "admin2NameEn": "",
+      "admin1NameKo": "강원특별자치도"
+    },
+    "location": {
+      "longitude": 128.8990843,
+      "latitude": 37.7563022
+    },
+    "createdAt": "2026-08-05T08:02:02.008Z",
+    "pendingAliasesMetadata": [
+      {
+        "source": "autocomplete_selection",
+        "status": "approved",
+        "searchable": true,
+        "selectionCount": 1,
+        "lastSelectedAt": "2026-08-05T08:02:02.008Z",
+        "alias": "강릉",
+        "createdAt": "2026-08-05T08:02:02.008Z"
+      }
+    ],
+    "hierarchySearchTokens": [
+      "강원특별자치도",
+      "Gangwon-do",
+      "강원",
+      "Gangwon"
+    ],
+    "searchable": true
+  }
+]

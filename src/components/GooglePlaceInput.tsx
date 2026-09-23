@@ -1,165 +1,183 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useMapsLibrary } from '@vis.gl/react-google-maps';
-import { MapPin, Loader2, Info, X } from 'lucide-react';
+import { MapPin, Loader2, Info, X, Sparkles, Building2, Globe, Search, Clock } from 'lucide-react';
+import { DestinationSearchItem, DestinationType } from '../types/destination';
+import { destinationSearchRepository } from '../services/DestinationSearchRepository';
+import { searchInternalDestinations } from '../services/destinationSearchService';
+import { groupAndDeduplicateDestinations } from '../utils/destinationGrouping';
 
-interface GooglePlaceInputProps {
+export interface GooglePlaceInputProps {
   value: string;
   address?: string;
   placeId?: string;
-  onChange: (value: string, address?: string, latLng?: { lat: number; lng: number }, placeId?: string) => void;
+  onChange: (
+    value: string,
+    address?: string,
+    latLng?: { lat: number; lng: number },
+    placeId?: string,
+    item?: DestinationSearchItem | null
+  ) => void;
   placeholder?: string;
   language?: 'ko' | 'en';
   icon?: React.ReactNode;
   inputClassName?: string;
+  onSelectDestination?: (item: DestinationSearchItem) => void;
 }
 
-const API_KEY =
-  process.env.GOOGLE_MAPS_PLATFORM_KEY ||
-  (import.meta as any).env?.VITE_GOOGLE_MAPS_PLATFORM_KEY ||
-  (globalThis as any).GOOGLE_MAPS_PLATFORM_KEY ||
-  '';
-const hasValidKey = Boolean(API_KEY) && API_KEY !== 'YOUR_API_KEY' && API_KEY.trim() !== '';
+export const POPULAR_DESTINATION_TAGS = [
+  { id: 'kr-jeonju', nameKo: '전주', nameEn: 'Jeonju', subKo: '전북특별자치도 · 대한민국', subEn: 'Jeonbuk · South Korea', type: 'city' as DestinationType },
+  { id: 'jp-tokyo', nameKo: '도쿄', nameEn: 'Tokyo', subKo: '도쿄도 · 일본', subEn: 'Tokyo Metropolis · Japan', type: 'city' as DestinationType },
+  { id: 'kr-jeju-island', nameKo: '제주도', nameEn: 'Jeju Island', subKo: '제주특별자치도 · 대한민국', subEn: 'Jeju Province · South Korea', type: 'island' as DestinationType },
+  { id: 'ph-boracay', nameKo: '보라카이', nameEn: 'Boracay', subKo: '아클란 · 필리핀', subEn: 'Aklan · Philippines', type: 'tourism_region' as DestinationType },
+  { id: 'fr-paris', nameKo: '파리', nameEn: 'Paris', subKo: '일드프랑스 · 프랑스', subEn: 'Île-de-France · France', type: 'city' as DestinationType },
+  { id: 'kr-seoul', nameKo: '서울', nameEn: 'Seoul', subKo: '서울특별시 · 대한민국', subEn: 'Seoul · South Korea', type: 'city' as DestinationType },
+];
 
-interface CacheEntry {
-  name: string;
-  address?: string;
-  latLng?: { lat: number; lng: number };
-  types?: string[];
+export const renderTypeIcon = (type?: DestinationType) => {
+  switch (type) {
+    case 'city':
+      return <Building2 size={14} className="text-blue-500 shrink-0" />;
+    case 'island':
+    case 'tourism_region':
+      return <Sparkles size={14} className="text-amber-500 shrink-0" />;
+    case 'country':
+      return <Globe size={14} className="text-emerald-500 shrink-0" />;
+    default:
+      return <MapPin size={14} className="text-purple-500 shrink-0" />;
+  }
+};
+
+export const renderTypeLabel = (type?: DestinationType, isKo: boolean = true) => {
+  switch (type) {
+    case 'city':
+      return isKo ? '도시' : 'City';
+    case 'island':
+      return isKo ? '섬·해양' : 'Island';
+    case 'tourism_region':
+      return isKo ? '여행권역' : 'Region';
+    case 'country':
+      return isKo ? '국가' : 'Country';
+    case 'admin_area':
+      return isKo ? '지역' : 'State';
+    case 'district':
+      return isKo ? '지역' : 'District';
+    default:
+      return isKo ? '목적지' : 'Destination';
+  }
+};
+
+interface DestinationGroupItemProps {
+  group: DestinationSearchItem;
+  onSelect: (item: DestinationSearchItem) => void;
+  isKo: boolean;
 }
 
-// Global client-side memory cache for place details to satisfy:
-// "DB에는 place_id, 이름, 좌표만 저장하고 이후에는 저장된 정보를 최대한 재사용"
-// Avoids making redundant Google Places Detail API calls for already-fetched/stored locations!
-const placeDetailsCache: Record<string, CacheEntry> = {};
+const DestinationGroupItemComponent: React.FC<DestinationGroupItemProps> = ({ group, onSelect, isKo }) => {
+  const rec = group.recommendedItem;
+  const alts = group.alternatives || [];
 
-// 1. Simple input component when API Key is missing (No Hooks from @vis.gl/react-google-maps are called here)
-function SimplePlaceInput({
-  value,
-  onChange,
-  placeholder,
-  language = 'ko',
-  icon,
-  inputClassName,
-}: Omit<GooglePlaceInputProps, 'address'>) {
-  const [inputValue, setInputValue] = useState(value);
-  const [showKeyGuide, setShowKeyGuide] = useState(false);
+  if (!rec) return null;
 
-  useEffect(() => {
-    setInputValue(value);
-  }, [value]);
-
-  const specificGuide = getSpecificLocationGuide(inputValue || value, language);
+  const recSearchItem: DestinationSearchItem = {
+    source: rec.source,
+    destinationId: rec.destinationId,
+    externalId: rec.externalId,
+    type: rec.type,
+    displayName: rec.label,
+    secondaryText: isKo ? 'Trippo 추천 여행지' : 'Trippo Recommended',
+    rawDestination: rec.rawDestination
+  };
 
   return (
-    <div className="space-y-1.5 w-full">
-      <div className="relative group">
-        <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => {
-            setInputValue(e.target.value);
-            onChange(e.target.value);
-          }}
-          className={`w-full bg-white dark:bg-[#181724] rounded-xl border border-gray-200 dark:border-zinc-700/80 pl-10 pr-9 py-3 text-sm font-sans text-gray-800 dark:text-text-primary placeholder:text-gray-400 dark:placeholder:text-zinc-500 shadow-sm hover:border-blue-400 dark:hover:border-blue-600 focus:border-blue-500 focus:bg-white dark:focus:bg-[#1a1924] focus:ring-2 focus:ring-blue-500/20 outline-none transition-all duration-200 ${inputClassName || ''}`}
-          placeholder={placeholder || (language === 'ko' ? '장소 또는 위치를 입력하세요' : 'Enter place or location')}
-        />
-        <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-blue-500 transition-colors pointer-events-none">
-          {icon || <MapPin size={16} />}
-        </div>
-        {inputValue && (
-          <button
-            type="button"
-            onClick={() => {
-              setInputValue('');
-              onChange('');
-            }}
-            className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors"
-          >
-            <X size={14} />
-          </button>
-        )}
-      </div>
-
-      {specificGuide && (
-        <div className="p-2.5 bg-blue-500/10 border border-blue-500/20 text-[10px] text-blue-700 dark:text-blue-300 rounded-xl flex gap-1.5 leading-normal">
-          <Info size={12} className="shrink-0 mt-0.5" />
-          <span>{specificGuide}</span>
-        </div>
-      )}
-      
-      <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 flex gap-2 items-start">
-        <Info size={14} className="text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-        <div className="text-[11px] text-amber-800 dark:text-amber-300 font-sans leading-relaxed flex-1">
-          <span>
-            {language === 'ko'
-              ? '구글맵 기준 실시간 장소 검색을 사용하려면 API 키를 입력해 주세요.'
-              : 'Please enter a Google Maps API Key to enable real-time location search.'}
+    <div className="border-b border-gray-100 dark:border-zinc-800/60 last:border-0 bg-blue-50/20 dark:bg-blue-900/10">
+      <div className="p-3">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-[10px] font-bold text-blue-500 uppercase px-1.5 py-0.5 bg-blue-100 dark:bg-blue-900/40 rounded">
+            {isKo ? 'Trippo 추천' : 'Trippo Recommended'}
           </span>
-          <button
-            type="button"
-            onClick={() => setShowKeyGuide(!showKeyGuide)}
-            className="text-blue-500 dark:text-blue-400 font-semibold underline hover:text-blue-600 ml-1"
-          >
-            {language === 'ko' ? '설정 방법 보기' : 'Show setup instructions'}
-          </button>
-          
-          {showKeyGuide && (
-            <div className="mt-2 p-2 bg-white dark:bg-[#1f1e2d] rounded-lg border border-amber-500/10 text-[10px] space-y-1 text-gray-600 dark:text-stone-300">
-              <p><strong>1단계:</strong> <a href="https://console.cloud.google.com/google/maps-apis/start?utm_campaign=gmp-code-assist-ais" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">API 키 받기</a></p>
-              <p><strong>2단계:</strong> 우측 상단 ⚙️ 아이콘 클릭 → <strong>Secrets</strong> → <code>GOOGLE_MAPS_PLATFORM_KEY</code> 이름으로 키 추가</p>
-            </div>
+          {group.groupingReason && (
+            <span className="text-[10px] text-gray-400">
+              {isKo ? '관련 범위 연관' : 'Related Scope'}
+            </span>
           )}
         </div>
+        <button
+          type="button"
+          onPointerDown={(e) => { e.preventDefault(); }}
+          onClick={() => onSelect(recSearchItem)}
+          className="w-full text-left p-3 bg-white dark:bg-zinc-900 rounded-xl border border-blue-200 dark:border-blue-800 shadow-sm transition-all flex items-start gap-3 cursor-pointer group hover:bg-blue-50 dark:hover:bg-blue-900/30"
+        >
+          <div className="p-2 rounded-lg bg-blue-100 dark:bg-blue-900/50 shrink-0 mt-0.5">
+            {renderTypeIcon(rec.type)}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-sm text-gray-900 dark:text-zinc-100 truncate">
+                {rec.label}
+              </span>
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 shrink-0">
+                {renderTypeLabel(rec.type, isKo)}
+              </span>
+            </div>
+            <p className="text-[11px] font-medium text-gray-600 dark:text-zinc-400 mt-1 line-clamp-2 leading-relaxed">
+              {rec.type === 'tourism_region'
+                ? (isKo ? '섬과 주요 시내를 포함해 대표 여행권역으로 분석해요' : 'Analyzes the region including islands and downtown.')
+                : rec.type === 'island'
+                ? (isKo ? '섬의 위치와 기후를 중심으로 분석해요.' : 'Analyzes the island location and climate.')
+                : (isKo ? '해당 행정구역과 시내를 중심으로 분석해요.' : 'Analyzes the specific administrative area.')
+              }
+            </p>
+          </div>
+        </button>
       </div>
+
+      {alts.length > 0 && (
+        <div className="px-3 pb-3">
+          <div className="flex items-center gap-2 mb-1.5 px-1 mt-1">
+            <span className="text-[10px] font-bold text-gray-400 dark:text-zinc-500 uppercase">
+              {isKo ? '정확한 범위 선택' : 'Specific Scope'}
+            </span>
+          </div>
+          <div className="space-y-1">
+            {alts.map((alt, aIdx) => {
+              const altSearchItem: DestinationSearchItem = {
+                source: alt.source,
+                destinationId: alt.destinationId,
+                externalId: alt.externalId,
+                type: alt.type,
+                displayName: alt.label,
+                secondaryText: renderTypeLabel(alt.type, isKo),
+                rawDestination: alt.rawDestination
+              };
+              return (
+                <button
+                  key={aIdx}
+                  type="button"
+                  onPointerDown={(e) => { e.preventDefault(); }}
+                  onClick={() => onSelect(altSearchItem)}
+                  className="w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-white/80 dark:hover:bg-zinc-800/80 flex items-center justify-between cursor-pointer transition-colors"
+                >
+                  <span className="font-medium text-gray-700 dark:text-zinc-300">
+                    {alt.label}
+                  </span>
+                  <span className="text-[10px] text-gray-400">
+                    {renderTypeLabel(alt.type, isKo)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
-}
+};
 
-function getSpecificLocationGuide(name: string, language: 'ko' | 'en'): string | null {
-  if (!name) return null;
-  const lower = name.toLowerCase();
-  
-  // Specific check for Narita Airport without Terminal
-  if ((lower.includes('narita') || lower.includes('나리타')) && 
-      (lower.includes('airport') || lower.includes('공항')) && 
-      !lower.includes('terminal') && !lower.includes('터미널') && !lower.includes('제')) {
-    return language === 'ko' 
-      ? "나리타 공항 검색 시, 가능한 한 구체적인 터미널(예: Narita Airport Terminal 2 / 나리타 공항 제2터미널)을 선택해 주세요."
-      : "When searching for Narita Airport, please select a specific terminal (e.g., Narita Airport Terminal 2) for accurate public transit directions.";
-  }
-  
-  // General airport check without Terminal
-  if ((lower.includes('airport') || lower.includes('공항')) && 
-      !lower.includes('terminal') && !lower.includes('터미널') && !lower.includes('제')) {
-    return language === 'ko'
-      ? "공항 검색 시, 정확한 대중교통 경로 조회를 위해 구체적인 터미널(예: Terminal 1, Terminal 2)을 선택해 주세요."
-      : "For airports, please select a specific terminal (e.g., Terminal 1, Terminal 2) for precise transit routing.";
-  }
+const hasIncompleteJamo = (str: string): boolean => {
+  const normalized = str.normalize('NFC');
+  return /[\u3130-\u318F]/.test(normalized);
+};
 
-  // General terminal check
-  if (lower.includes('terminal') || lower.includes('터미널')) {
-    return null; // already specific
-  }
-
-  // Train station, Bus terminal, Shopping mall, Theme park, University check
-  const hasKeywords = 
-    lower.includes('station') || lower.includes('역') || 
-    lower.includes('bus') || lower.includes('버스') ||
-    lower.includes('mall') || lower.includes('쇼핑몰') || lower.includes('아울렛') || lower.includes('outlet') ||
-    lower.includes('theme park') || lower.includes('테마파크') || lower.includes('disney') || lower.includes('디즈니') || lower.includes('universal studio') || lower.includes('유니버셜') ||
-    lower.includes('university') || lower.includes('대학') || lower.includes('campus') || lower.includes('캠퍼스');
-
-  if (hasKeywords) {
-    return language === 'ko'
-      ? "기차역, 버스터미널, 쇼핑몰, 테마파크, 대학 캠퍼스 등 대형 장소는 대표 좌표 대신 실제 세부 구역이나 역 단위를 선택하시면 정확한 경로가 계산됩니다."
-      : "For stations, bus terminals, malls, theme parks, and campuses, selecting a specific station or sub-area rather than the general coordinate provides accurate transit routes.";
-  }
-
-  return null;
-}
-
-// 2. Full autocomplete input component when API Key is present (Safe to call hooks from @vis.gl/react-google-maps)
-function GooglePlaceInputWithMaps({
+export const GooglePlaceInput: React.FC<GooglePlaceInputProps> = ({
   value,
   address,
   placeId,
@@ -167,50 +185,96 @@ function GooglePlaceInputWithMaps({
   placeholder,
   language = 'ko',
   icon,
-  inputClassName,
-}: GooglePlaceInputProps) {
-  const [inputValue, setInputValue] = useState(value);
-  const [suggestions, setSuggestions] = useState<google.maps.places.AutocompletePrediction[]>([]);
+  inputClassName = '',
+  onSelectDestination,
+}) => {
+  const [inputValue, setInputValue] = useState(value || '');
   const [isOpen, setIsOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const [searchState, setSearchState] = useState<
+    | 'idle'
+    | 'searching'
+    | 'internal_results'
+    | 'external_searching'
+    | 'results'
+    | 'empty'
+    | 'empty_verified'
+    | 'external_error'
+    | 'unsupported_type'
+    | 'error'
+  >('idle');
+  const [items, setItems] = useState<DestinationSearchItem[]>([]);
+  const [recentSearches, setRecentSearches] = useState<DestinationSearchItem[]>([]);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [focusedIndex, setFocusedIndex] = useState<number>(-1);
+  const [isImeComposing, setIsImeComposing] = useState(false);
 
-  const specificGuide = getSpecificLocationGuide(inputValue || value, language);
-
-  const placesLib = useMapsLibrary('places');
-  const [autocompleteService, setAutocompleteService] = useState<google.maps.places.AutocompleteService | null>(null);
-  
   const containerRef = useRef<HTMLDivElement>(null);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const requestSequenceRef = useRef<number>(0);
+  const isImeComposingRef = useRef<boolean>(false);
+  const parentUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const compositionSessionIdRef = useRef<string>('');
+  const inputValueRef = useRef<string>(value || '');
+  const resolvingExternalIdRef = useRef<string | null>(null);
 
-  // Keep internal state in sync with prop
+  if (!compositionSessionIdRef.current) {
+    compositionSessionIdRef.current = Math.random().toString(36).substring(2, 9);
+  }
+
+  const isKo = language === 'ko';
+  const lang: 'ko' | 'en' = isKo ? 'ko' : 'en';
+
+  const logTrace = (params: {
+    eventType: string;
+    eventValue?: string;
+    nativeIsComposing?: boolean | null;
+    debounceScheduled?: boolean | null;
+    debounceCancelled?: boolean | null;
+    autocompleteTriggered?: boolean | null;
+    autocompleteQuery?: string | null;
+    responseAccepted?: boolean | null;
+    responseDiscardReason?: string | null;
+  }) => {
+    const timestamp = Date.now();
+    console.log(`[DESTINATION_INPUT_TRACE]`, {
+      eventType: params.eventType,
+      eventTimestamp: timestamp,
+      eventValue: params.eventValue !== undefined ? params.eventValue : inputValueRef.current,
+      reactQueryState: inputValueRef.current,
+      nativeEventIsComposing: params.nativeIsComposing !== undefined ? params.nativeIsComposing : null,
+      reactIsComposingState: isImeComposing,
+      compositionSessionId: compositionSessionIdRef.current,
+      debounceScheduled: params.debounceScheduled !== undefined ? params.debounceScheduled : null,
+      debounceCancelled: params.debounceCancelled !== undefined ? params.debounceCancelled : null,
+      autocompleteTriggered: params.autocompleteTriggered !== undefined ? params.autocompleteTriggered : null,
+      autocompleteQuery: params.autocompleteQuery !== undefined ? params.autocompleteQuery : null,
+      requestSequence: requestSequenceRef.current,
+      responseAccepted: params.responseAccepted !== undefined ? params.responseAccepted : null,
+      responseDiscardReason: params.responseDiscardReason || null,
+    });
+  };
+
   useEffect(() => {
-    setInputValue(value);
+    setInputValue(value || '');
+    inputValueRef.current = value || '';
   }, [value]);
 
-  // Fetch types on mount/prop change for warnings
   useEffect(() => {
-    if (placeId) {
-      const cacheKey = `${placeId}_${language}`;
-      if (placeDetailsCache[cacheKey]?.types) {
-        setSelectedTypes(placeDetailsCache[cacheKey].types || []);
-      } else if (placesLib && hasValidKey) {
-        const place = new placesLib.Place({ id: placeId });
-        place.fetchFields({ fields: ['types'] }).then(() => {
-          const types = place.types || [];
-          setSelectedTypes(types);
-          if (placeDetailsCache[cacheKey]) {
-            placeDetailsCache[cacheKey].types = types;
-          } else {
-            placeDetailsCache[cacheKey] = { name: value, address, types };
-          }
-        }).catch(err => console.error("Error fetching place types on mount:", err));
-      }
-    } else {
-      setSelectedTypes([]);
-    }
-  }, [placeId, placesLib, hasValidKey, language]);
+    inputValueRef.current = inputValue;
+  }, [inputValue]);
 
-  // Close dropdown when clicking outside
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('trippo_recent_destinations');
+      if (saved) {
+        setRecentSearches(JSON.parse(saved).slice(0, 5));
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }, []);
+
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
@@ -221,275 +285,631 @@ function GooglePlaceInputWithMaps({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Initialize Autocomplete Service
   useEffect(() => {
-    if (placesLib) {
-      setAutocompleteService(new placesLib.AutocompleteService());
-    }
-  }, [placesLib]);
+    setFocusedIndex(-1);
+  }, [isOpen, items]);
 
-  // Fetch suggestions as user types
+  // Clean up timers and abort active requests on unmount
   useEffect(() => {
-    // Requirements:
-    // 1. 입력 후 300~500ms debounce 적용 -> 400ms debounce duration chosen
-    // 2. 사용자가 3자 이상 입력했을 때만 Autocomplete 호출 -> length >= 3
-    if (!autocompleteService || !inputValue.trim() || !isOpen || inputValue.trim().length < 3) {
-      setSuggestions([]);
-      return;
-    }
-
-    const delayDebounce = setTimeout(() => {
-      setIsLoading(true);
-      autocompleteService.getPlacePredictions(
-        {
-          input: inputValue,
-          language: language === 'ko' ? 'ko' : 'en',
-        },
-        (predictions, status) => {
-          setIsLoading(false);
-          if (status === 'OK' && predictions) {
-            setSuggestions(predictions);
-          } else {
-            setSuggestions([]);
-          }
-        }
-      );
-    }, 400); // 400ms Debounce
-
-    return () => clearTimeout(delayDebounce);
-  }, [inputValue, autocompleteService, isOpen, language]);
-
-  const handleSelectPrediction = async (prediction: google.maps.places.AutocompletePrediction) => {
-    setIsOpen(false);
-    setIsLoading(true);
-    setInputValue(prediction.structured_formatting.main_text);
-    const placeId = prediction.place_id;
-
-    // "DB에는 place_id, 이름, 좌표만 저장하고 이후에는 저장된 정보를 최대한 재사용"
-    // Check our client-side memory cache first to avoid calling the Google Place details fetch
-    const cacheKey = `${placeId}_${language}`;
-    if (placeDetailsCache[cacheKey]) {
-      const cached = placeDetailsCache[cacheKey];
-      setSelectedTypes(cached.types || []);
-      onChange(cached.name, cached.address, cached.latLng, placeId);
-      setIsLoading(false);
-      return;
-    }
-    
-    try {
-      if (placesLib) {
-        // Place Details is called ONLY when the user selects a suggestion (clicked/tapped)
-        const place = new placesLib.Place({ 
-          id: placeId,
-          requestedLanguage: language === 'ko' ? 'ko' : 'en',
-        });
-        await place.fetchFields({
-          fields: ['displayName', 'formattedAddress', 'location', 'types'],
-        });
-
-        const rawDisplayName = typeof place.displayName === 'string'
-          ? place.displayName
-          : (place.displayName as any)?.text;
-
-        let name = rawDisplayName || prediction.structured_formatting.main_text;
-        let formattedAddress = place.formattedAddress || prediction.description;
-
-        // If in English mode, avoid overriding English prediction with Korean rawDisplayName / address
-        if (language === 'en') {
-          const hasKoreanInName = /[\u3131-\u318E\uAC00-\uD7A3]/.test(name);
-          const predMain = prediction.structured_formatting.main_text;
-          const hasKoreanInPred = /[\u3131-\u318E\uAC00-\uD7A3]/.test(predMain);
-          if (hasKoreanInName && !hasKoreanInPred && predMain) {
-            name = predMain;
-          }
-
-          const hasKoreanInAddr = /[\u3131-\u318E\uAC00-\uD7A3]/.test(formattedAddress);
-          const predDesc = prediction.description;
-          const hasKoreanInDesc = /[\u3131-\u318E\uAC00-\uD7A3]/.test(predDesc);
-          if (hasKoreanInAddr && !hasKoreanInDesc && predDesc) {
-            formattedAddress = predDesc;
-          }
-        }
-
-        setInputValue(name);
-        const latLng = place.location
-          ? { lat: place.location.lat(), lng: place.location.lng() }
-          : undefined;
-        const types = place.types || [];
-
-        // Save to cache for maximum reuse
-        placeDetailsCache[cacheKey] = { name, address: formattedAddress, latLng, types };
-        setSelectedTypes(types);
-
-        onChange(name, formattedAddress, latLng, placeId);
-      } else {
-        setSelectedTypes([]);
-        onChange(prediction.structured_formatting.main_text, prediction.description, undefined, placeId);
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
       }
-    } catch (error) {
-      console.error('Error fetching place details:', error);
-      setSelectedTypes([]);
-      onChange(prediction.structured_formatting.main_text, prediction.description, undefined, placeId);
-    } finally {
-      setIsLoading(false);
+      if (parentUpdateTimerRef.current) {
+        clearTimeout(parentUpdateTimerRef.current);
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort('component_unmounted');
+      }
+    };
+  }, []);
+
+  const executeDestinationAutocomplete = async (query: string) => {
+    const trimmed = query.trim();
+    if (trimmed.length === 0) {
+      setSearchState('idle');
+      setItems([]);
+      return;
+    }
+
+    const currentSeq = ++requestSequenceRef.current;
+    
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('new_request_started');
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    const requestId = `req_${currentSeq}_${Math.random().toString(36).substring(2, 7)}`;
+    console.log(`[DESTINATION_ABORT_TRACE] Created Request:`, {
+      requestId,
+      abortControllerId: currentSeq,
+      createdAt: Date.now(),
+      query: trimmed
+    });
+
+    const isCjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/i.test(trimmed);
+    const minExternalLength = isCjk ? 2 : 3;
+
+    // Check internal coverage
+    const internalItems = searchInternalDestinations(trimmed, 8, lang);
+
+    // Exact Match check
+    const normalizedQuery = trimmed.toLowerCase().replace(/\s+/g, '');
+    const hasExactMatch = internalItems.some(item => {
+      const namesList = [
+        item.names?.ko,
+        item.names?.en,
+        item.names?.local,
+        item.displayName,
+        item.names?.displayKo,
+        item.names?.displayEn,
+        item.names?.officialKo,
+        item.names?.officialEn
+      ];
+      return namesList.some(name => {
+        if (!name) return false;
+        return name.trim().toLowerCase().replace(/\s+/g, '') === normalizedQuery;
+      });
+    });
+
+    // Complete Coverage check
+    const groupedInternal = groupAndDeduplicateDestinations(internalItems, trimmed);
+    const hasCompleteGrouping = groupedInternal.some(item => {
+      if (!item.isGroup) return false;
+      const types = new Set<string>();
+      if (item.recommendedItem?.type) types.add(item.recommendedItem.type);
+      if (item.alternatives) {
+        item.alternatives.forEach(alt => {
+          if (alt.type) types.add(alt.type);
+        });
+      }
+      return types.has('city') && types.has('island');
+    });
+
+    const isExternalFallbackRequired = !(hasExactMatch || hasCompleteGrouping);
+    const incomplete = hasIncompleteJamo(trimmed);
+    const isExternalEligible = !incomplete && isExternalFallbackRequired && trimmed.length >= minExternalLength;
+
+    if (isExternalEligible) {
+      setSearchState('external_searching');
+    } else {
+      setSearchState('searching');
+    }
+
+    const searchStartedAt = Date.now();
+    logTrace({ eventType: 'executeDestinationAutocomplete started', eventValue: trimmed });
+
+    try {
+      const res = await destinationSearchRepository.autocomplete(
+        trimmed,
+        lang,
+        8,
+        false,
+        false,
+        controller.signal
+      );
+
+      if (requestSequenceRef.current !== currentSeq) {
+        logTrace({ eventType: 'responseAccepted', eventValue: trimmed, responseAccepted: false, responseDiscardReason: 'stale_sequence' });
+        return;
+      }
+
+      logTrace({ eventType: 'responseAccepted', eventValue: trimmed, responseAccepted: true });
+
+      const internalCompleteAt = Date.now();
+      console.log(`[DESTINATION_PERFORMANCE_TRACE] q="${trimmed}" internalCompleteAt=${internalCompleteAt - searchStartedAt}ms`);
+
+      if (res.items && res.items.length > 0) {
+        setItems(res.items);
+        if (res.status === 'results_internal') {
+          setSearchState('internal_results');
+        } else {
+          setSearchState('results');
+        }
+      } else {
+        setItems([]);
+        if (res.status === 'empty_verified') {
+          setSearchState('empty_verified');
+        } else if (res.status === 'external_error') {
+          setSearchState('external_error');
+        } else if (res.status === 'unsupported_type') {
+          setSearchState('unsupported_type');
+        } else {
+          setSearchState('empty_verified');
+        }
+      }
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        console.log(`[DESTINATION_ABORT_TRACE] Aborted Request:`, {
+          requestId,
+          abortControllerId: currentSeq,
+          abortedAt: Date.now(),
+          abortReason: 'new_request_started_or_cleanup',
+          query: trimmed
+        });
+        return;
+      }
+      if (requestSequenceRef.current !== currentSeq) {
+        return;
+      }
+      console.error('Destination search error:', err);
+      setSearchState('external_error');
     }
   };
 
-  // Determine warnings
-  const isLowAccuracy = selectedTypes.some(t => 
-    ['route', 'intersection', 'locality', 'sublocality', 'administrative_area'].some(low => t === low || t.startsWith(low + '_') || t.includes(low))
-  );
+  const triggerAutocompleteWithDebounce = (val: string) => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
 
-  const isNaritaTerminal23 = placeId === 'ChIJ4yM7gZ3zImARsGTFuKlNSQc' || 
-    placeId === 'ChIJYd_6WXnzImAR89wPaFU25-8' || 
-    (value && value.toLowerCase().includes('narita') && 
-     (value.toLowerCase().includes('terminal 2') || value.toLowerCase().includes('terminal 3') || value.toLowerCase().includes('2터미널') || value.toLowerCase().includes('3터미널')) && 
-     !value.toLowerCase().includes('station'));
+    const trimmed = val.trim();
+    if (trimmed.length === 0) {
+      setSearchState('idle');
+      setItems([]);
+      return;
+    }
 
-  const isGenericAirportTerminal = !isNaritaTerminal23 && value && (
-    value.toLowerCase().includes('airport terminal') || 
-    value.toLowerCase().includes('공항 터미널') || 
-    value.toLowerCase().includes('공항 제') || 
-    (value.toLowerCase().includes('airport') && (value.toLowerCase().includes('t1') || value.toLowerCase().includes('t2') || value.toLowerCase().includes('t3')))
-  ) && !value.toLowerCase().includes('station') && !value.toLowerCase().includes('역');
+    const AUTOCOMPLETE_DEBOUNCE_MS = isImeComposing ? 350 : 250;
+    logTrace({ eventType: 'useEffect execution', debounceScheduled: true, eventValue: trimmed });
+
+    debounceTimerRef.current = setTimeout(() => {
+      const querySnapshot = inputValueRef.current.trim();
+      executeDestinationAutocomplete(querySnapshot);
+    }, AUTOCOMPLETE_DEBOUNCE_MS);
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    logTrace({ eventType: 'onChange', eventValue: val, nativeIsComposing: (e.nativeEvent as any).isComposing });
+    setInputValue(val);
+    setIsOpen(true);
+
+    const wasEmpty = !inputValue || inputValue.trim() === '';
+    const isEmpty = !val || val.trim() === '';
+
+    if (wasEmpty !== isEmpty || isEmpty) {
+      onChange(val, '', undefined, '', null);
+    }
+
+    triggerAutocompleteWithDebounce(val);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!isOpen) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        setIsOpen(true);
+      }
+      return;
+    }
+
+    const maxIndex = items.length - 1;
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setFocusedIndex((prev) => (prev >= maxIndex ? 0 : prev + 1));
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setFocusedIndex((prev) => (prev <= 0 ? maxIndex : prev - 1));
+        break;
+      case 'Enter':
+        if (focusedIndex >= 0 && focusedIndex <= maxIndex) {
+          e.preventDefault();
+          const selected = items[focusedIndex];
+          if (selected.isGroup && selected.recommendedItem) {
+            handleSelect({
+              source: selected.recommendedItem.source,
+              destinationId: selected.recommendedItem.destinationId,
+              externalId: selected.recommendedItem.externalId,
+              type: selected.recommendedItem.type,
+              displayName: selected.recommendedItem.label,
+              secondaryText: renderTypeLabel(selected.recommendedItem.type, isKo),
+              rawDestination: selected.recommendedItem.rawDestination
+            });
+          } else {
+            handleSelect(selected);
+          }
+        } else {
+          if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+          }
+          const querySnapshot = inputValueRef.current.trim();
+          executeDestinationAutocomplete(querySnapshot);
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        setIsOpen(false);
+        break;
+      case 'Tab':
+        setIsOpen(false);
+        break;
+    }
+  };
+
+  const handleSelect = async (item: DestinationSearchItem) => {
+    if (item.source === 'external' && item.externalId) {
+      if (resolvingExternalIdRef.current === item.externalId) {
+        console.log(`[DOUBLE_TAP_PREVENT] Already resolving externalId: ${item.externalId}`);
+        return;
+      }
+    }
+
+    setInputValue(item.displayName);
+    setIsOpen(false);
+
+    try {
+      const updated = [item, ...recentSearches.filter((r) => r.displayName !== item.displayName)].slice(0, 5);
+      setRecentSearches(updated);
+      localStorage.setItem('trippo_recent_destinations', JSON.stringify(updated));
+    } catch (e) {
+      // Ignore
+    }
+
+    if (item.source === 'external' && item.externalId) {
+      resolvingExternalIdRef.current = item.externalId;
+
+      const pendingItem: DestinationSearchItem = {
+        ...item,
+        isResolving: true
+      };
+
+      onChange(
+        item.displayName,
+        item.secondaryText,
+        undefined,
+        item.externalId,
+        pendingItem
+      );
+      if (onSelectDestination) onSelectDestination(pendingItem);
+
+      try {
+        const resolved = await destinationSearchRepository.resolve(item.externalId, lang, item.displayName);
+        
+        if (resolvingExternalIdRef.current !== item.externalId) {
+          console.log(`[RESOLVE_STALE_DISCARD] Discard stale resolve for externalId: ${item.externalId}`);
+          return;
+        }
+
+        let secondaryParts: string[] = [];
+        if (resolved.hierarchy.admin2NameKo || resolved.hierarchy.admin2NameEn) {
+          secondaryParts.push(
+            isKo
+              ? resolved.hierarchy.admin2NameKo || resolved.hierarchy.admin2NameEn!
+              : resolved.hierarchy.admin2NameEn || resolved.hierarchy.admin2NameKo!
+          );
+        }
+        if (resolved.hierarchy.admin1NameKo || resolved.hierarchy.admin1NameEn) {
+          secondaryParts.push(
+            isKo
+              ? resolved.hierarchy.admin1NameKo || resolved.hierarchy.admin1NameEn!
+              : resolved.hierarchy.admin1NameEn || resolved.hierarchy.admin1NameKo!
+          );
+        }
+        if (resolved.hierarchy.countryNameKo || resolved.hierarchy.countryNameEn) {
+          secondaryParts.push(
+            isKo
+              ? resolved.hierarchy.countryNameKo || resolved.hierarchy.countryNameEn!
+              : resolved.hierarchy.countryNameEn || resolved.hierarchy.countryNameKo!
+          );
+        }
+        const resolvedSecondaryText = secondaryParts.join(' · ') || (isKo ? '여행지' : 'Destination');
+
+        const resolvedItem: DestinationSearchItem = {
+          source: 'internal',
+          destinationId: resolved.id,
+          type: resolved.type,
+          displayName: isKo ? resolved.names.ko : resolved.names.en,
+          secondaryText: resolvedSecondaryText,
+          names: resolved.names,
+          countryCode: resolved.hierarchy.countryCode,
+          timezoneId: resolved.timezoneId,
+          location: resolved.location,
+          rawDestination: resolved,
+          isResolving: false
+        };
+
+        onChange(
+          resolvedItem.displayName,
+          resolvedItem.secondaryText,
+          resolvedItem.location,
+          resolvedItem.destinationId,
+          resolvedItem
+        );
+        if (onSelectDestination) onSelectDestination(resolvedItem);
+      } catch (err) {
+        console.error('[RESOLVE_FAILED]', err);
+        if (resolvingExternalIdRef.current === item.externalId) {
+          const errorItem: DestinationSearchItem = {
+            ...item,
+            isResolving: false,
+            isResolveError: true
+          };
+          onChange(item.displayName, item.secondaryText, undefined, item.externalId, errorItem);
+          if (onSelectDestination) onSelectDestination(errorItem);
+        }
+      } finally {
+        if (resolvingExternalIdRef.current === item.externalId) {
+          resolvingExternalIdRef.current = null;
+        }
+      }
+    } else {
+      resolvingExternalIdRef.current = null;
+      onChange(item.displayName, item.secondaryText, item.location, item.destinationId, item);
+      if (onSelectDestination) onSelectDestination(item);
+    }
+  };
+
+  const handleSelectPopularTag = (tag: typeof POPULAR_DESTINATION_TAGS[0]) => {
+    const name = isKo ? tag.nameKo : tag.nameEn;
+    const sub = isKo ? tag.subKo : tag.subEn;
+
+    const item: DestinationSearchItem = {
+      source: 'internal',
+      destinationId: tag.id,
+      type: tag.type,
+      displayName: name,
+      secondaryText: sub,
+      names: { ko: tag.nameKo, en: tag.nameEn },
+      countryCode: tag.id.startsWith('kr') ? 'KR' : tag.id.startsWith('jp') ? 'JP' : tag.id.startsWith('ph') ? 'PH' : 'FR',
+    };
+
+    resolvingExternalIdRef.current = null;
+    setInputValue(name);
+    setIsOpen(false);
+    onChange(name, sub, undefined, tag.id, item);
+    if (onSelectDestination) onSelectDestination(item);
+  };
+
+  const handleClear = () => {
+    setInputValue('');
+    setItems([]);
+    setSearchState('idle');
+    setIsOpen(true);
+    onChange('', '', undefined, '', null);
+  };
 
   return (
-    <div ref={containerRef} className="relative w-full space-y-1">
-      <div className="relative group">
+    <div ref={containerRef} className="relative w-full">
+      <div className="relative flex items-center">
+        <div className="absolute left-3.5 pointer-events-none text-gray-400 dark:text-zinc-500">
+          {icon || <Search size={16} />}
+        </div>
+
         <input
           type="text"
           value={inputValue}
-          onChange={(e) => {
-            setInputValue(e.target.value);
-            onChange(e.target.value);
+          onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
+          onFocus={() => {
             setIsOpen(true);
+            logTrace({ eventType: 'onFocus' });
           }}
-          onFocus={() => setIsOpen(true)}
-          className={`w-full bg-white dark:bg-[#181724] rounded-xl border border-gray-200 dark:border-zinc-700/80 pl-10 pr-9 py-3 text-sm font-sans text-gray-800 dark:text-text-primary placeholder:text-gray-400 dark:placeholder:text-zinc-500 shadow-sm hover:border-blue-400 dark:hover:border-blue-600 focus:border-blue-500 focus:bg-white dark:focus:bg-[#1a1924] focus:ring-2 focus:ring-blue-500/20 outline-none transition-all duration-200 ${inputClassName || ''}`}
-          placeholder={placeholder || (language === 'ko' ? '예: 도쿄 타워, 신주쿠역' : 'e.g., Tokyo Tower, Shinjuku Station')}
+          onBlur={() => {
+            logTrace({ eventType: 'onBlur' });
+          }}
+          onCompositionStart={() => {
+            setIsImeComposing(true);
+            isImeComposingRef.current = true;
+            logTrace({ eventType: 'onCompositionStart', nativeIsComposing: true });
+          }}
+          onCompositionEnd={(e) => {
+            setIsImeComposing(false);
+            isImeComposingRef.current = false;
+            setInputValue(e.currentTarget.value);
+            logTrace({ eventType: 'onCompositionEnd', eventValue: e.currentTarget.value, nativeIsComposing: false });
+          }}
+          onInput={(e) => {
+            logTrace({ eventType: 'onInput', eventValue: e.currentTarget.value, nativeIsComposing: (e.nativeEvent as any).isComposing });
+          }}
+          placeholder={
+            placeholder ||
+            (isKo ? '방문 도시, 지역 또는 섬 입력 (예: 전주, 도쿄, 제주도, 보라카이)' : 'Search city, island or region (e.g., Jeonju, Tokyo, Boracay)')
+          }
+          className={`w-full pl-10 pr-9 py-3 text-xs sm:text-sm font-semibold rounded-xl border border-gray-200 dark:border-zinc-700/80 bg-white dark:bg-[#181724] text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-500 focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 transition-all ${inputClassName}`}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={isOpen}
+          aria-haspopup="listbox"
+          aria-label={isKo ? "여행 목적지 검색" : "Search travel destination"}
         />
-        <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-blue-500 transition-colors pointer-events-none">
-          {icon || <MapPin size={16} />}
-        </div>
-        {isLoading ? (
-          <div className="absolute right-3 top-1/2 -translate-y-1/2 text-blue-500 pointer-events-none">
-            <Loader2 size={16} className="animate-spin" />
-          </div>
-        ) : inputValue ? (
+
+        {inputValue && (
           <button
             type="button"
-            onClick={() => {
-              setInputValue('');
-              onChange('');
-              setIsOpen(false);
-            }}
-            className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors"
+            onClick={handleClear}
+            className="absolute right-3 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 p-1 cursor-pointer"
           >
             <X size={14} />
           </button>
-        ) : null}
+        )}
       </div>
 
-      {/* Address feedback if selected */}
-      {address && !isOpen && (
-        <p className="text-[10px] text-gray-400 dark:text-zinc-500 px-1 truncate">
-          📍 {address}
-        </p>
-      )}
-
-      {/* Accuracy policy warnings */}
-      {isLowAccuracy && !isOpen && (
-        <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-[10px] text-amber-700 dark:text-amber-300 rounded-xl flex gap-1.5 leading-normal">
-          <Info size={12} className="shrink-0 mt-0.5" />
-          <span>
-            {language === 'ko'
-              ? '정확한 이동시간 계산을 위해 도로명이나 지역명 대신 실제 건물, 역, 관광지 또는 상세 주소를 선택해 주세요.'
-              : 'For accurate travel time calculation, please select an actual building, station, attraction, or detailed address instead of a street or area name.'}
-          </span>
-        </div>
-      )}
-
-      {/* Airport Terminal Transit recommendations */}
-      {isNaritaTerminal23 && !isOpen && (
-        <div className="p-2.5 bg-blue-500/10 border border-blue-500/20 text-[10px] text-blue-700 dark:text-blue-300 rounded-xl space-y-1.5 leading-normal">
-          <div className="flex gap-1.5">
-            <Info size={12} className="shrink-0 mt-0.5" />
-            <span>
-              {language === 'ko'
-                ? "나리타 공항 제2/3터미널에서 대중교통을 이용하시는 경우, 터미널 건물 대신 실제 공항역인 'Narita Airport Terminal 2·3 Station'을 선택하시면 더 정확한 대중교통 경로와 시간이 계산됩니다."
-                : "If you are using public transit at Narita Airport Terminal 2/3, selecting the actual station 'Narita Airport Terminal 2·3 Station' instead of the terminal building will provide more accurate transit routes and times."}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              onChange(
-                "Narita Airport Terminal 2·3 Station", 
-                "Japan, 〒286-0104 Chiba, Narita, Furugome, Narita Airport Terminal 2･3 Station, 字古込", 
-                { lat: 35.7730734, lng: 140.3874543 }, 
-                "ChIJVSqON3bzImARUTDmWTxZGRc"
-              );
-            }}
-            className="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 active:scale-95 transition-all ml-4 bg-white/40 dark:bg-black/20 px-2 py-1 rounded-md border border-blue-500/20"
-          >
-            🚉 {language === 'ko' ? '추천 공항역으로 변경하기' : 'Switch to recommended Airport Station'}
-          </button>
-        </div>
-      )}
-
-      {isGenericAirportTerminal && !isOpen && (
-        <div className="p-2.5 bg-blue-500/10 border border-blue-500/20 text-[10px] text-blue-700 dark:text-blue-300 rounded-xl flex gap-1.5 leading-normal">
-          <Info size={12} className="shrink-0 mt-0.5" />
-          <span>
-            {language === 'ko'
-              ? '공항 터미널에서 대중교통을 이용하시는 경우, 정확한 대중교통 경로 조회를 위해 터미널 건물 대신 공항 기차역/지하철역 장소를 선택해 주세요.'
-              : 'When using public transit from an airport terminal, please select the airport train/subway station instead of the terminal building for accurate transit routing.'}
-          </span>
-        </div>
-      )}
-
-      {/* Specific Location Guidance */}
-      {specificGuide && !isOpen && !isLowAccuracy && !isNaritaTerminal23 && !isGenericAirportTerminal && (
-        <div className="p-2.5 bg-blue-500/10 border border-blue-500/20 text-[10px] text-blue-700 dark:text-blue-300 rounded-xl flex gap-1.5 leading-normal">
-          <Info size={12} className="shrink-0 mt-0.5" />
-          <span>{specificGuide}</span>
-        </div>
-      )}
-
-      {/* Autocomplete Suggestions Dropdown - Only show if input length >= 3 */}
-      {isOpen && (inputValue.trim().length >= 3) && (
-        <div className="absolute left-0 right-0 z-50 mt-1 max-h-60 overflow-y-auto bg-white dark:bg-[#1f1e2d] border border-gray-100 dark:border-subtle-border rounded-xl shadow-xl divide-y divide-gray-50 dark:divide-white/5 custom-scrollbar overflow-hidden">
-          {suggestions.length === 0 && !isLoading ? (
-            <div className="px-4 py-3 text-xs text-gray-400 dark:text-zinc-500 font-sans text-center rounded-xl">
-              {language === 'ko' ? '검색 결과가 없습니다.' : 'No suggestions found.'}
+      {isOpen && (
+        <div className="absolute z-50 left-0 right-0 mt-2 bg-white dark:bg-[#1c1b2b] border border-gray-200 dark:border-zinc-700/80 rounded-2xl shadow-xl overflow-hidden max-h-80 overflow-y-auto custom-scrollbar transition-all">
+          {searchState === 'searching' && (
+            <div className="p-4 text-center space-y-2">
+              <div className="flex items-center justify-center gap-2 text-xs font-semibold text-blue-600 dark:text-blue-400">
+                <Loader2 size={16} className="animate-spin" />
+                <span>
+                  {isKo ? '목적지를 찾고 있어요...' : 'Finding destination...'}
+                </span>
+              </div>
             </div>
-          ) : (
-            suggestions.map((prediction) => (
+          )}
+
+          {searchState === 'external_searching' && (
+            <div className="p-4 text-center space-y-2">
+              <div className="flex items-center justify-center gap-2 text-xs font-semibold text-blue-600 dark:text-blue-400">
+                <Loader2 size={16} className="animate-spin" />
+                <span>
+                  {isKo ? `“${inputValue}”을 찾고 있어요...` : `Searching for "${inputValue}"...`}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {searchState === 'idle' && inputValue.trim().length === 0 && (
+            <div className="p-3.5 space-y-3">
+              {recentSearches.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-wider text-gray-400 uppercase">
+                    <Clock size={12} />
+                    <span>{isKo ? '최근 검색한 목적지' : 'Recent Searches'}</span>
+                  </div>
+                  <div className="space-y-1">
+                    {recentSearches.map((item, idx) => (
+                      <button
+                        key={`${item.displayName}-${idx}`}
+                        type="button"
+                        onPointerDown={(e) => { e.preventDefault(); }}
+                        onClick={() => handleSelect(item)}
+                        className="w-full text-left px-3 py-2 rounded-xl text-xs hover:bg-gray-50 dark:hover:bg-zinc-800/60 flex items-center justify-between cursor-pointer"
+                      >
+                        <span className="font-semibold text-gray-800 dark:text-zinc-200">
+                          {item.displayName}
+                        </span>
+                        <span className="text-[10px] text-gray-400">{item.secondaryText}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-bold tracking-wider text-gray-400 uppercase block">
+                  {isKo ? '🔥 인기 추천 목적지' : '🔥 Popular Destinations'}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {POPULAR_DESTINATION_TAGS.map((tag) => (
+                    <button
+                      key={tag.id}
+                      type="button"
+                      onPointerDown={(e) => { e.preventDefault(); }}
+                      onClick={() => handleSelectPopularTag(tag)}
+                      className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-gray-100 dark:bg-zinc-800 hover:bg-blue-50 dark:hover:bg-blue-950/40 hover:text-blue-600 dark:hover:text-blue-400 text-gray-700 dark:text-zinc-300 transition-all cursor-pointer flex items-center gap-1"
+                    >
+                      <span>{renderTypeIcon(tag.type)}</span>
+                      <span>{isKo ? tag.nameKo : tag.nameEn}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {(searchState === 'results' || searchState === 'internal_results') && (
+            <div className="flex flex-col divide-y divide-gray-100 dark:divide-zinc-800/60">
+              <div className="divide-y divide-gray-100 dark:divide-zinc-800/60 overflow-y-auto max-h-64 custom-scrollbar">
+                {items.map((item, index) =>
+                  item.isGroup ? (
+                    <DestinationGroupItemComponent
+                      key={`group-${index}`}
+                      group={item}
+                      onSelect={handleSelect}
+                      isKo={isKo}
+                    />
+                  ) : (
+                    <button
+                      key={`${item.destinationId || item.externalId || index}`}
+                      type="button"
+                      onPointerDown={(e) => { e.preventDefault(); }}
+                        onClick={() => handleSelect(item)}
+                      className={`w-full text-left p-3 transition-all flex items-start gap-3 cursor-pointer group ${
+                        index === focusedIndex
+                          ? 'bg-blue-50/90 dark:bg-blue-950/50 ring-1 ring-blue-400 dark:ring-blue-500/50'
+                          : 'hover:bg-blue-50/60 dark:hover:bg-blue-950/30'
+                      }`}
+                    >
+                      <div className="p-2 rounded-lg bg-gray-100 dark:bg-zinc-800 group-hover:bg-blue-100 dark:group-hover:bg-blue-900/40 shrink-0 mt-0.5">
+                        {renderTypeIcon(item.type)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-xs sm:text-sm text-gray-900 dark:text-zinc-100 truncate">
+                            {item.displayName}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 shrink-0">
+                            {renderTypeLabel(item.type, isKo)}
+                          </span>
+                        </div>
+                        {item.secondaryText && (
+                          <p className="text-[11px] text-gray-500 dark:text-zinc-400 truncate mt-0.5">
+                            {item.secondaryText}
+                          </p>
+                        )}
+                      </div>
+                    </button>
+                  )
+                )}
+              </div>
+              {items.some((item) => item.source === 'external') && (
+                <div className="px-3.5 py-1.5 bg-gray-50/50 dark:bg-zinc-900/10 flex items-center justify-end text-[10px] text-gray-400 dark:text-zinc-500 font-medium">
+                  Powered by Google
+                </div>
+              )}
+            </div>
+          )}
+
+          {(searchState === 'empty' || searchState === 'empty_verified') && (
+            <div className="p-4 text-center space-y-1.5">
+              <Info size={18} className="mx-auto text-gray-400 dark:text-zinc-500" />
+              <p className="text-xs font-semibold text-gray-600 dark:text-zinc-400 leading-relaxed">
+                {isKo
+                  ? '여행지를 찾지 못했어요. 도시, 국가, 지역 또는 섬 이름으로 검색해 주세요.'
+                  : 'No matching results found. Please search again by city, country, island, or region name.'}
+              </p>
+            </div>
+          )}
+
+          {searchState === 'external_error' && (
+            <div className="p-4 text-center space-y-2">
+              <Info size={18} className="mx-auto text-amber-500" />
+              <p className="text-xs font-semibold text-amber-600 dark:text-amber-400 leading-relaxed">
+                {isKo
+                  ? '지역 검색 서비스를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.'
+                  : 'We couldn’t load the location search service. Please try again shortly.'}
+              </p>
               <button
-                key={prediction.place_id}
                 type="button"
-                onClick={() => handleSelectPrediction(prediction)}
-                className="w-full text-left px-4 py-2.5 text-xs hover:bg-gray-50 dark:hover:bg-white/5 flex flex-col gap-0.5 transition-all first:rounded-t-[11px] last:rounded-b-[11px]"
+                onClick={() => executeDestinationAutocomplete(inputValue.trim())}
+                className="mt-1 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 dark:bg-amber-900/30 dark:hover:bg-amber-900/50 dark:text-amber-300 text-[11px] font-bold rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1"
               >
-                <span className="font-sans font-bold text-gray-800 dark:text-text-primary truncate">
-                  {prediction.structured_formatting.main_text}
-                </span>
-                <span className="font-sans text-[10px] text-gray-400 dark:text-zinc-500 truncate">
-                  {prediction.structured_formatting.secondary_text || prediction.description}
-                </span>
+                {isKo ? '다시 검색' : 'Try again'}
               </button>
-            ))
+            </div>
+          )}
+
+          {searchState === 'unsupported_type' && (
+            <div className="p-4 text-center space-y-1.5">
+              <Info size={18} className="mx-auto text-blue-500" />
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400 leading-relaxed">
+                {isKo
+                  ? '현재 Trippo는 도시, 지역 및 섬 단위 여행만 지원합니다. (선택한 장소는 지원하지 않는 유형입니다)'
+                  : 'Trippo currently only supports city, region, and island travel. (Selected location is an unsupported type)'}
+              </p>
+            </div>
+          )}
+
+          {searchState === 'error' && (
+            <div className="p-4 text-center space-y-1.5">
+              <Info size={18} className="mx-auto text-red-500" />
+              <p className="text-xs font-semibold text-red-600 dark:text-red-400 leading-relaxed">
+                {errorMessage ||
+                  (isKo
+                    ? '목적지 정보를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.'
+                    : 'Failed to retrieve destination details. Please try again.')}
+              </p>
+            </div>
           )}
         </div>
       )}
     </div>
   );
-}
+};
 
-// 3. Exported wrapper that conditionally renders either Simple or Maps version depending on hasValidKey
-export default function GooglePlaceInput(props: GooglePlaceInputProps) {
-  if (hasValidKey) {
-    return <GooglePlaceInputWithMaps {...props} />;
-  }
-  return <SimplePlaceInput {...props} />;
-}
+export default GooglePlaceInput;

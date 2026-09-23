@@ -14,6 +14,8 @@ import LoginScreen from './components/LoginScreen';
 import { INITIAL_LOGS, INITIAL_PLAN } from './data/mockData';
 import { TravelLog, TravelPlan, Destination } from './types';
 import { Language } from './utils/translations';
+import { JourneyPassData, createJourneyPassData, calculateDateDuration } from './types/journeyPass';
+import JourneyPassTransition from './components/JourneyPassTransition';
 import { createSharedPlan, updateSharedPlan, subscribeToSharedPlan, syncUserToFirestore } from './lib/firebaseService';
 import { auth } from './lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
@@ -22,6 +24,12 @@ import { isDeepEqual } from './utils/deepEqual';
 export default function App() {
   const [activeTab, setActiveTab] = useState('explore'); // Initial active tab is 'explore' (조회)
   const [user, setUser] = useState<User | null | undefined>(undefined); // undefined means loading
+
+  // Journey Pass Printing Signature Transition States
+  const [activeJourneyPassData, setActiveJourneyPassData] = useState<JourneyPassData | null>(null);
+  const [isPlanningTransitionActive, setIsPlanningTransitionActive] = useState<boolean>(false);
+  const [isPlanReady, setIsPlanReady] = useState<boolean>(false);
+  const [isPlanError, setIsPlanError] = useState<boolean>(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -384,130 +392,155 @@ export default function App() {
   };
 
   // Callback when a recommended destination is clicked or custom analysis is applied
-  const handleSelectDestinationWithDates = (destName: string, startDate?: string, endDate?: string) => {
-    if (!plan) return;
+  const handleSelectDestinationWithDates = (
+    destName: string,
+    startDate?: string,
+    endDate?: string,
+    context?: { placeId?: string; countryCode?: string; countryName?: string; timezoneId?: string; city?: string }
+  ) => {
+    if (!plan || isPlanningTransitionActive) return;
 
-    // Format dates cleanly, e.g., "2026. 07. 15"
-    const formatDate = (dateStr?: string) => {
-      if (!dateStr) return '';
-      const d = new Date(dateStr);
-      if (isNaN(d.getTime())) return dateStr;
-      return `${d.getFullYear()}. ${String(d.getMonth() + 1).padStart(2, '0')}. ${String(d.getDate()).padStart(2, '0')}`;
-    };
+    // 1. Immediately create JourneyPassData and trigger the signature printing transition
+    const passData = createJourneyPassData({
+      destinationId: context?.placeId || `dest-${Date.now()}`,
+      rawDestinationName: destName,
+      countryCode: context?.countryCode,
+      countryName: context?.countryName,
+      startDate: startDate || '2026-07-22',
+      endDate: endDate || '2026-07-29',
+      timezoneId: context?.timezoneId,
+      language
+    });
 
-    const formattedStart = formatDate(startDate) || plan.startDate;
-    const formattedEnd = formatDate(endDate) || plan.endDate;
+    setActiveJourneyPassData(passData);
+    setIsPlanningTransitionActive(true);
+    setIsPlanReady(false);
+    setIsPlanError(false);
 
-    // Calculate duration text
-    let durationText = plan.durationText;
-    if (startDate && endDate) {
-      const sDate = new Date(startDate);
-      const eDate = new Date(endDate);
-      const diffTime = Math.abs(eDate.getTime() - sDate.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      if (!isNaN(diffDays) && diffDays > 0) {
-        durationText = language === 'ko' ? `${diffDays}박 ${diffDays + 1}일` : `${diffDays}N ${diffDays + 1}D`;
+    // 2. Concurrently initialize the Travel Plan in parallel with the transition animation
+    try {
+      // Format dates cleanly, e.g., "2026. 07. 15"
+      const formatDate = (dateStr?: string) => {
+        if (!dateStr) return '';
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return dateStr;
+        return `${d.getFullYear()}. ${String(d.getMonth() + 1).padStart(2, '0')}. ${String(d.getDate()).padStart(2, '0')}`;
+      };
+
+      const formattedStart = formatDate(startDate) || plan.startDate;
+      const formattedEnd = formatDate(endDate) || plan.endDate;
+
+      // Calculate duration text
+      let durationText = plan.durationText;
+      if (startDate && endDate) {
+        const { nights, days } = calculateDateDuration(startDate, endDate);
+        durationText = language === 'ko' ? `${nights}박 ${days}일` : `${nights}N ${days}D`;
       }
-    }
 
-    // Generate days array based on date range
-    let daysArray = plan.days;
-    if (startDate && endDate) {
-      const sDate = new Date(startDate);
-      const eDate = new Date(endDate);
-      const diffTime = Math.abs(eDate.getTime() - sDate.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-      
-      const weekdays = language === 'ko' 
-        ? ['일', '월', '화', '수', '목', '금', '토']
-        : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      
-      daysArray = [];
-      for (let i = 0; i < Math.min(diffDays, 10); i++) { // Limit to max 10 days for performance
-        const current = new Date(sDate);
-        current.setDate(sDate.getDate() + i);
-        const dateStr = `${current.getFullYear()}. ${String(current.getMonth() + 1).padStart(2, '0')}. ${String(current.getDate()).padStart(2, '0')}`;
-        const dayOfWeek = weekdays[current.getDay()];
+      // Generate days array based on date range
+      let daysArray = plan.days;
+      if (startDate && endDate) {
+        const sParts = startDate.split('-').map(Number);
+        const sDate = sParts.length === 3 ? new Date(sParts[0], sParts[1] - 1, sParts[2]) : new Date(startDate);
+        const { days: diffDays } = calculateDateDuration(startDate, endDate);
         
-        // Find existing items if any, or generate demo items for the new destination
-        let items = [];
-        if (i === 0) {
-          items = [
-            {
-              id: `item-${Date.now()}-1`,
-              title: language === 'ko' ? `${destName} 여행 시작` : `Start of ${destName} Trip`,
-              time: '10:00 AM',
-              content: language === 'ko' ? '새로운 도시에서의 설레는 여정이 시작됩니다!' : 'Exciting journey begins in a new city!'
-            }
-          ];
-        } else if (i === diffDays - 1) {
-          items = [
-            {
-              id: `item-${Date.now()}-2`,
-              title: language === 'ko' ? '체크아웃 및 귀국 준비' : 'Checkout & Return Prep',
-              time: '11:00 AM',
-              content: language === 'ko' ? '소중한 기억을 안고 일상으로 복귀합니다.' : 'Returning to daily life with wonderful memories.'
-            }
-          ];
-        } else {
-          items = [
-            {
-              id: `item-${Date.now()}-${i}-1`,
-              title: language === 'ko' ? `${destName} 자유 투어` : `${destName} Free Tour`,
-              time: '10:30 AM',
-              content: language === 'ko' ? '자유롭게 현지 맛집과 명소를 탐방해보세요.' : 'Explore local restaurants and attractions freely.'
-            }
-          ];
+        const weekdays = language === 'ko' 
+          ? ['일', '월', '화', '수', '목', '금', '토']
+          : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        
+        daysArray = [];
+        for (let i = 0; i < Math.min(diffDays, 14); i++) { // Support up to 14 days
+          const current = new Date(sDate);
+          current.setDate(sDate.getDate() + i);
+          const dateStr = `${current.getFullYear()}. ${String(current.getMonth() + 1).padStart(2, '0')}. ${String(current.getDate()).padStart(2, '0')}`;
+          const dayOfWeek = weekdays[current.getDay()];
+          
+          // Find existing items if any, or generate demo items for the new destination
+          let items = [];
+          if (i === 0) {
+            items = [
+              {
+                id: `item-${Date.now()}-1`,
+                title: language === 'ko' ? `${passData.destinationName} 여행 시작` : `Start of ${passData.destinationName} Trip`,
+                time: '10:00 AM',
+                content: language === 'ko' ? '새로운 도시에서의 설레는 여정이 시작됩니다!' : 'Exciting journey begins in a new city!'
+              }
+            ];
+          } else if (i === diffDays - 1) {
+            items = [
+              {
+                id: `item-${Date.now()}-2`,
+                title: language === 'ko' ? '체크아웃 및 귀국 준비' : 'Checkout & Return Prep',
+                time: '11:00 AM',
+                content: language === 'ko' ? '소중한 기억을 안고 일상으로 복귀합니다.' : 'Returning to daily life with wonderful memories.'
+              }
+            ];
+          } else {
+            items = [
+              {
+                id: `item-${Date.now()}-${i}-1`,
+                title: language === 'ko' ? `${passData.destinationName} 자유 일정` : `${passData.destinationName} Free Itinerary`,
+                time: '10:30 AM',
+                content: language === 'ko' ? '자유롭게 현지 맛집과 명소를 탐방해보세요.' : 'Explore local restaurants and attractions freely.'
+              }
+            ];
+          }
+
+          daysArray.push({
+            dayNumber: i + 1,
+            date: dateStr,
+            dayOfWeek,
+            items
+          });
         }
-
-        daysArray.push({
-          dayNumber: i + 1,
-          date: dateStr,
-          dayOfWeek,
-          items
-        });
+      } else {
+        // If no custom dates, just change the title
+        daysArray = plan.days.map(day => ({
+          ...day,
+          items: day.items.map(item => ({
+            ...item,
+            title: item.title.replace('도쿄', passData.destinationName).replace('나리타', passData.destinationName)
+          }))
+        }));
       }
-    } else {
-      // If no custom dates, just change the title
-      daysArray = plan.days.map(day => ({
-        ...day,
-        items: day.items.map(item => ({
-          ...item,
-          title: item.title.replace('도쿄', destName).replace('나리타', destName)
-        }))
-      }));
+
+      const creatorCompanion = user ? {
+        id: user.uid,
+        name: user.displayName || user.email?.split('@')[0] || 'Unknown User',
+        email: user.email || '',
+        isLocal: false,
+        photoURL: user.photoURL || undefined
+      } : null;
+
+      const currentComps = plan.companions || [];
+      const isCreatorAlreadyIn = user && currentComps.some(c => c.id === user.uid);
+      const newComps = isCreatorAlreadyIn || !creatorCompanion ? currentComps : [...currentComps, creatorCompanion];
+
+      const updatedPlan: TravelPlan = {
+        ...plan,
+        id: `plan-${Date.now()}`,
+        title: language === 'ko' ? `${passData.destinationName} 여행 계획` : `${passData.destinationName} Itinerary`,
+        startDate: formattedStart,
+        endDate: formattedEnd,
+        durationText,
+        days: daysArray,
+        companions: newComps
+      };
+
+      setPlan(updatedPlan);
+      localStorage.setItem('trippo_plan', JSON.stringify(updatedPlan));
+      
+      // Parallel initialization complete
+      setIsPlanReady(true);
+    } catch (planErr) {
+      console.error('[PLAN_CREATION_ERROR]', planErr);
+      setIsPlanError(true);
     }
+  };
 
-    const creatorCompanion = user ? {
-      id: user.uid,
-      name: user.displayName || user.email?.split('@')[0] || 'Unknown User',
-      email: user.email || '',
-      isLocal: false,
-      photoURL: user.photoURL || undefined
-    } : null;
-
-    const currentComps = plan.companions || [];
-    const isCreatorAlreadyIn = user && currentComps.some(c => c.id === user.uid);
-    const newComps = isCreatorAlreadyIn || !creatorCompanion ? currentComps : [...currentComps, creatorCompanion];
-
-    const updatedPlan: TravelPlan = {
-      ...plan,
-      id: `plan-${Date.now()}`,
-      title: language === 'ko' ? `${destName} 여행 계획` : `${destName} Itinerary`,
-      startDate: formattedStart,
-      endDate: formattedEnd,
-      durationText,
-      days: daysArray,
-      companions: newComps
-    };
-
-    setPlan(updatedPlan);
-    
-    const alertMsg = language === 'ko'
-      ? `"${destName}" 일정을 계획 탭으로 연동하여 ${durationText} 계획을 새로 구성했습니다! ✈️`
-      : `Linked "${destName}" to the Plan tab and created a new ${durationText} itinerary! ✈️`;
-    alert(alertMsg);
-    
+  const handleCompleteJourneyPassTransition = () => {
+    setIsPlanningTransitionActive(false);
+    setActiveJourneyPassData(null);
     handleSetActiveTab('plan');
   };
 
@@ -537,7 +570,7 @@ export default function App() {
           {activeTab === 'explore' && (
             <div className="w-full h-full transition-none transform-none animate-none">
               <ExploreTab 
-                onSelectDestination={(dest, start, end) => handleSelectDestinationWithDates(dest, start, end)}
+                onSelectDestination={(dest, start, end, ctx) => handleSelectDestinationWithDates(dest, start, end, ctx)}
                 language={language}
                 isDarkMode={isDarkMode}
               />
@@ -686,6 +719,27 @@ export default function App() {
             isDarkMode={isDarkMode}
           />
         </div>
+
+      {/* Signature Journey Pass Printing Transition Overlay */}
+      {isPlanningTransitionActive && activeJourneyPassData && (
+        <JourneyPassTransition
+          data={activeJourneyPassData}
+          planReady={isPlanReady}
+          onTransitionComplete={handleCompleteJourneyPassTransition}
+          language={language}
+          isDarkMode={isDarkMode}
+          isPlanError={isPlanError}
+          onRetryPlan={() => {
+            if (activeJourneyPassData) {
+              handleSelectDestinationWithDates(
+                activeJourneyPassData.destinationName,
+                activeJourneyPassData.startDate,
+                activeJourneyPassData.endDate
+              );
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
